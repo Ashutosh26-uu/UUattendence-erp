@@ -1,0 +1,23 @@
+# One-click deploy on Render (free plan, demo only).
+# The free disk is wiped on every restart/deploy, so the server re-creates the
+# admin account and demo data on start. Passwords: Render dashboard -> Environment.
+services:
+  - type: web
+    name: uu-college-erp
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/public-info
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: SEED_DEMO
+        value: "1"
+      - key: ADMIN_PASSWORD
+        generateValue: true
+      - key: DEMO_PASSWORD
+        generateValue: true

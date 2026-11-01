@@ -41,6 +41,16 @@ npm run seed:demo
 
 The demo logins are saved in `data/demo-logins.txt`.
 
+## Put it online (Render, free demo)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Ashutosh26-uu/UUattendence-erp)
+
+Click the button, sign in to Render with GitHub and press **Apply**. `render.yaml` sets everything up, and every push to `main` redeploys.
+
+- Passwords: Render dashboard -> the service -> **Environment**. `ADMIN_PASSWORD` is for the `admin` login. `DEMO_PASSWORD` is for `teacher1`, `teacher2` and the students `bca3a01`..`bca3b12`.
+- The free plan **wipes all data on every restart or deploy**, and the server sleeps after 15 minutes without visits (the first visit after that takes about a minute). On every start the admin account and demo data are created again. For real use, move to a paid plan with a persistent disk mounted at `/opt/render/project/src/data`, and remove `SEED_DEMO`.
+- A cloud server cannot reach a classroom IP camera on the campus LAN. Online, use "This computer's camera" (works because Render gives https) or "Upload a photo".
+
 ## Cameras
 
 - **Classroom IP camera**: in *Classes*, set the camera's JPEG snapshot URL, for example `http://user:pass@192.168.1.50/cgi-bin/snapshot.cgi`. The server fetches the picture, so the camera password never reaches the browser. Only Basic auth is supported.

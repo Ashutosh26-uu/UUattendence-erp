@@ -64,14 +64,23 @@ app.use((err, req, res, next) => {
   res.status(err.status).json({ error: err.message, ...(err.extra || {}) });
 });
 
-// First run: create the admin account with a one-time password.
+// First run: create the admin account. On a host without file access (e.g. Render free)
+// set ADMIN_PASSWORD; otherwise a one-time password is written to data/initial-admin.txt.
 if (!one("SELECT 1 FROM users WHERE role = 'admin'")) {
-  const password = tempPassword();
-  run("INSERT INTO users(username, password_hash, role, name, must_change_pw) VALUES ('admin', ?, 'admin', 'Administrator', 1)", hashPassword(password));
-  const file = path.join(DATA_DIR, 'initial-admin.txt');
-  fs.writeFileSync(file, `username: admin\npassword: ${password}\n(you must change it after the first login; delete this file afterwards)\n`);
-  console.log(`Created admin account. One-time password saved in ${file}`);
+  if (process.env.ADMIN_PASSWORD) {
+    run("INSERT INTO users(username, password_hash, role, name, must_change_pw) VALUES ('admin', ?, 'admin', 'Administrator', 0)", hashPassword(process.env.ADMIN_PASSWORD));
+    console.log('Created admin account with the password from ADMIN_PASSWORD');
+  } else {
+    const password = tempPassword();
+    run("INSERT INTO users(username, password_hash, role, name, must_change_pw) VALUES ('admin', ?, 'admin', 'Administrator', 1)", hashPassword(password));
+    const file = path.join(DATA_DIR, 'initial-admin.txt');
+    fs.writeFileSync(file, `username: admin\npassword: ${password}\n(you must change it after the first login; delete this file afterwards)\n`);
+    console.log(`Created admin account. One-time password saved in ${file}`);
+  }
 }
+
+// SEED_DEMO=1 fills an empty database with demo data (for hosts whose disk resets on restart).
+if (process.env.SEED_DEMO === '1') require('./scripts/seed-demo').seedDemo();
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
