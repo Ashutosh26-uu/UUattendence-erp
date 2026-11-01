@@ -167,10 +167,150 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 `);
 
+// ---- Academic and campus modules ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS result_entries (
+  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
+  subject_id INTEGER NOT NULL REFERENCES subjects(id),
+  semester INTEGER NOT NULL,
+  class_id INTEGER NOT NULL REFERENCES classes(id),
+  internal REAL,
+  external REAL,
+  updated_by INTEGER REFERENCES users(id),
+  PRIMARY KEY (student_id, subject_id, semester)
+);
+CREATE TABLE IF NOT EXISTS result_publish (
+  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  semester INTEGER NOT NULL,
+  published_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (class_id, semester)
+);
+CREATE TABLE IF NOT EXISTS leave_requests (
+  id INTEGER PRIMARY KEY,
+  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
+  from_date TEXT NOT NULL,
+  to_date TEXT NOT NULL,
+  leave_type TEXT NOT NULL DEFAULT 'personal',
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+  remark TEXT,
+  reviewed_by INTEGER REFERENCES users(id),
+  reviewed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS homework (
+  id INTEGER PRIMARY KEY,
+  class_id INTEGER NOT NULL REFERENCES classes(id),
+  subject_id INTEGER NOT NULL REFERENCES subjects(id),
+  teacher_id INTEGER NOT NULL REFERENCES users(id),
+  title TEXT NOT NULL,
+  description TEXT,
+  due_date TEXT NOT NULL,
+  max_marks REAL NOT NULL DEFAULT 10,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS homework_submissions (
+  homework_id INTEGER NOT NULL REFERENCES homework(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
+  answer TEXT,
+  file_name TEXT,
+  file_type TEXT,
+  file_data BLOB,
+  submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  marks REAL,
+  feedback TEXT,
+  PRIMARY KEY (homework_id, student_id)
+);
+CREATE TABLE IF NOT EXISTS books (
+  id INTEGER PRIMARY KEY,
+  accession_no TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  isbn TEXT,
+  title TEXT NOT NULL,
+  author TEXT,
+  category TEXT,
+  copies INTEGER NOT NULL DEFAULT 1 CHECK (copies >= 0),
+  shelf TEXT
+);
+CREATE TABLE IF NOT EXISTS book_issues (
+  id INTEGER PRIMARY KEY,
+  book_id INTEGER NOT NULL REFERENCES books(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  issued_on TEXT NOT NULL,
+  due_on TEXT NOT NULL,
+  returned_on TEXT,
+  fine REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS hostels (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  type TEXT NOT NULL DEFAULT 'boys' CHECK (type IN ('boys','girls')),
+  warden_name TEXT,
+  warden_phone TEXT
+);
+CREATE TABLE IF NOT EXISTS hostel_rooms (
+  id INTEGER PRIMARY KEY,
+  hostel_id INTEGER NOT NULL REFERENCES hostels(id) ON DELETE CASCADE,
+  room_no TEXT NOT NULL,
+  capacity INTEGER NOT NULL DEFAULT 2 CHECK (capacity > 0),
+  UNIQUE (hostel_id, room_no)
+);
+CREATE TABLE IF NOT EXISTS hostel_allotments (
+  student_id INTEGER PRIMARY KEY REFERENCES students(user_id) ON DELETE CASCADE,
+  room_id INTEGER NOT NULL REFERENCES hostel_rooms(id),
+  allotted_on TEXT NOT NULL DEFAULT (date('now'))
+);
+CREATE TABLE IF NOT EXISTS bus_routes (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  bus_no TEXT,
+  driver_name TEXT,
+  driver_phone TEXT,
+  stops TEXT,
+  departure_time TEXT
+);
+CREATE TABLE IF NOT EXISTS transport_allotments (
+  student_id INTEGER PRIMARY KEY REFERENCES students(user_id) ON DELETE CASCADE,
+  route_id INTEGER NOT NULL REFERENCES bus_routes(id),
+  stop TEXT
+);
+CREATE TABLE IF NOT EXISTS feedback (
+  id INTEGER PRIMARY KEY,
+  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
+  teacher_id INTEGER NOT NULL REFERENCES users(id),
+  subject_id INTEGER NOT NULL REFERENCES subjects(id),
+  cycle TEXT NOT NULL,
+  q1 INTEGER NOT NULL, q2 INTEGER NOT NULL, q3 INTEGER NOT NULL, q4 INTEGER NOT NULL, q5 INTEGER NOT NULL,
+  comment TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (student_id, subject_id, cycle)
+);
+CREATE TABLE IF NOT EXISTS grievances (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  category TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  description TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','in_progress','resolved')),
+  response TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+// Columns added after the first release.
+const hasColumn = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+if (!hasColumn('students', 'blood_group')) db.exec('ALTER TABLE students ADD COLUMN blood_group TEXT');
+
 const DEFAULT_SETTINGS = {
   college_name: 'UU College',
+  college_short: 'UU',
+  academic_session: '2026-27',
   match_threshold: '0.5',
   min_face_confidence: '0.5',
+  library_fine_per_day: '2',
+  library_issue_days: '14',
+  feedback_open: '1',
+  feedback_cycle: '2026-27 Odd Sem',
 };
 for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
   db.prepare('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)').run(key, value);

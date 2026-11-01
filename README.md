@@ -16,11 +16,13 @@ A standard college ERP (students, teachers, classes, subjects, timetable, exams 
 5. **Manual marking at any time.** The teacher can mark any student Present or Absent by hand. A manual mark always wins over the camera.
 6. **Submit.** Attendance counts only after the teacher submits. Unmarked students are saved as absent. After that the record is locked; only the admin can correct it, and every correction is written to the audit log.
 
-## Roles
+## Roles and modules
 
-- **Admin**: departments, classes (with the classroom camera URL), subjects, teachers, students (one by one or a pasted list), subject allotment, timetable, fee heads and fee collection with receipts, notices, attendance reports (CSV), corrections, settings, audit log.
-- **Teacher**: take attendance, face enrolment, their students, exams and marks, attendance report (CSV), timetable, notices.
-- **Student**: attendance by subject (with a warning below 75%), marks, fees and receipts, timetable, notices, profile.
+- **Admin**: dashboard with charts (daily attendance, class-wise attendance, fee collection), departments, classes (with the classroom camera URL), subjects, faculty, students (one by one or a pasted list), subject allotment, timetable, attendance reports (CSV) and corrections, leave requests, **results** (internal + external marks, publish, grade cards with SGPA/CGPA), fee heads and fee collection with receipts, **library** (catalogue, issue/return, late fine), **hostel** (hostels, rooms, allotment), **transport** (bus routes, bus passes), printable **student ID cards**, notices, **grievances**, **faculty feedback** report, settings, audit log.
+- **Teacher**: dashboard (today's classes, attendance by subject), take attendance, face enrolment, attendance report, leave approvals, **assignments** (post, view submissions, grade), class tests, **internal marks**, timetable, own feedback (anonymous), notices, grievance.
+- **Student**: dashboard (photo, attendance chart, CGPA, fees, pending assignments, today's classes, notices), attendance (warning below 75%), timetable, assignments (submit text or a file up to 2 MB), class tests, **results / grade card** (printable), fees and receipts, **leave** application, library, hostel and bus details, **ID card** (printable), faculty feedback, grievance, profile.
+
+Results use a 10-point scale: internal 40 + external 60; O 90+, A+ 80+, A 70+, B+ 60+, B 50+, C 45+, P 40+, F below 40. SGPA and CGPA are credit-weighted; % = CGPA x 9.5. Students can log in with their roll number.
 
 ## Run it
 

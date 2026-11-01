@@ -1,69 +1,16 @@
 import {
-  h, api, toast, busy, confirmBox, showSecret, table, buildForm, selectEl, startApp,
-  fmtDate, fmtDateTime, money, pctBadge, DAYS,
+  h, api, toast, busy, confirmBox, showSecret, table, buildForm, selectEl, startApp, crudView,
+  fmtDate, fmtDateTime, money, pctBadge, DAYS, statCard, cardTitle, donut, bars, columns,
 } from './common.js';
 import { enrollView } from './enroll.js';
+import { leaveReview, resultsSheet, feedbackSummary } from './modules.js';
+import { resultsAdmin, library, hostel, transport, grievances, idCards } from './admin-campus.js';
 
 const options = async (url, label) => (await api(url)).map((r) => ({ value: r.id, label: label(r) }));
 const deptOptions = () => options('/api/admin/departments', (d) => `${d.code} - ${d.name}`);
 const classOptions = () => options('/api/admin/classes', (c) => c.name);
 const subjectOptions = () => options('/api/admin/subjects', (s) => `${s.code} - ${s.name}`);
 const dayOptions = DAYS.slice(1).map((d, i) => ({ value: i + 1, label: d }));
-
-// Generic list + add/edit form for one master table.
-function crudView({ endpoint, columns, fields, intro, toValues, onCreated, rowActions, filter, canDelete = true, extra }) {
-  return async (main) => {
-    const fieldList = await fields();
-    const formCard = h('div', { class: 'card hidden' });
-    const listCard = h('div', { class: 'card' });
-    let filterEl = null;
-    if (filter) filterEl = selectEl(await filter.options(), { placeholder: filter.placeholder, onchange: () => load() });
-    main.append(
-      h('div', { class: 'between' }, h('p', { class: 'muted', text: intro || '' }),
-        h('div', { class: 'row' }, filterEl, extra?.(load), h('button', { class: 'primary', text: 'Add new', onclick: () => openForm(null) }))),
-      formCard, listCard);
-
-    function openForm(row) {
-      formCard.replaceChildren(h('h2', { text: row ? 'Edit' : 'Add new' }), buildForm(fieldList.filter((f) => !(row && f.createOnly)), {
-        values: row ? (toValues ? toValues(row) : row) : (filterEl?.value ? { [filter.param]: filterEl.value } : {}),
-        submitLabel: row ? 'Save changes' : 'Add',
-        onCancel: () => formCard.classList.add('hidden'),
-        onSubmit: async (d) => {
-          if (row) {
-            await api(`${endpoint}/${row.id}`, { method: 'PUT', body: d });
-            toast('Saved');
-          } else {
-            const r = await api(endpoint, { method: 'POST', body: d });
-            toast('Added');
-            if (onCreated) await onCreated(r, d);
-          }
-          formCard.classList.add('hidden');
-          await load();
-        },
-      }));
-      formCard.classList.remove('hidden');
-      formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-
-    async function load() {
-      const rows = await api(filterEl?.value ? `${endpoint}?${filter.param}=${filterEl.value}` : endpoint);
-      listCard.replaceChildren(table([...columns, {
-        label: '', class: 'actions', render: (r) => h('span', { class: 'row end' },
-          h('button', { class: 'sm', text: 'Edit', onclick: () => openForm(r) }),
-          rowActions?.(r, load),
-          canDelete && h('button', {
-            class: 'sm danger', text: 'Delete', onclick: busy(async () => {
-              if (!await confirmBox('Delete this record?', { ok: 'Delete', danger: true })) return;
-              await api(`${endpoint}/${r.id}`, { method: 'DELETE' });
-              toast('Deleted');
-              await load();
-            }),
-          })),
-      }], rows));
-    }
-    await load();
-  };
-}
 
 function userActions(r, reload) {
   return [
@@ -88,22 +35,39 @@ const activeBadge = (r) => h('span', { class: `badge ${r.active ? 'ok' : 'bad'}`
 const showCreatedLogin = (r, d) => showSecret('Account created', `Login for ${d.username}:`, r.temp_password);
 
 // ---- Views ----
-async function dashboard(main) {
+async function dashboard(main, ctx) {
   const s = await api('/api/admin/stats');
-  const stat = (label, value, sub) => h('div', { class: 'stat' }, h('div', { class: 'label', text: label }), h('div', { class: 'value', text: value }), sub && h('div', { class: 'sub', text: sub }));
+  ctx.setBadge('leave', s.pending_leaves);
+  ctx.setBadge('grievances', s.open_grievances);
+  const feePct = s.fees_total ? (s.fees_collected / s.fees_total) * 100 : null;
   main.append(h('div', { class: 'stats' },
-    stat('Students', s.students, `${s.face_enrolled} face enrolled`),
-    stat('Teachers', s.teachers),
-    stat('Classes', s.classes),
-    stat('Subjects', s.subjects),
-    stat('Attendance today', s.sessions_today, `${s.sessions_open} open now`),
-    stat('Fees collected', money(s.fees_collected))));
-  main.append(h('div', { class: 'card' }, h('h2', { text: 'Setting up' }), h('ol', null,
-    ['Add departments', 'Add classes (and the classroom camera snapshot URL, if the class has an IP camera)', 'Add subjects',
-      'Add teachers and students (each gets a one-time password)', 'Assign subjects to teachers for each class',
-      'Enrol student faces once per class (Face enrolment)', 'Teachers start attendance from their login'].map((t) => h('li', { text: t })))));
-}
+    statCard('students', 'Students', s.students, `${s.face_enrolled} face enrolled`),
+    statCard('teacher', 'Faculty', s.teachers, `${s.subjects} subjects`),
+    statCard('building', 'Classes', s.classes),
+    statCard('scan', 'Attendance today', s.sessions_today, `${s.sessions_open} in progress`, 'ok'),
+    statCard('wallet', 'Fees collected', money(s.fees_collected), `of ${money(s.fees_total)}`, 'ok'),
+    statCard('calendar', 'Leave requests', s.pending_leaves, 'pending', s.pending_leaves ? 'warn' : ''),
+    statCard('alert', 'Grievances', s.open_grievances, 'open', s.open_grievances ? 'bad' : ''),
+    statCard('library', 'Books issued', s.books_issued, `${s.hostel_residents} in hostel · ${s.bus_riders} on bus`)));
 
+  main.append(h('div', { class: 'grid-2-1' },
+    h('div', { class: 'card' }, cardTitle('chart', 'Daily attendance (last 14 class days)'),
+      columns(s.attendance_trend.map((d) => {
+        const p = d.total ? Math.round((d.present / d.total) * 100) : 0;
+        return { label: new Date(`${d.date}T00:00:00`).toLocaleDateString('en', { day: '2-digit', month: 'short' }), value: p, text: `${p}%` };
+      }))),
+    h('div', { class: 'card' }, cardTitle('wallet', 'Fee collection'),
+      h('div', { class: 'donut-wrap' }, donut(feePct, 'collected', 'ok'),
+        h('div', { class: 'legend' }, h('div', null, h('span', { class: 'dot c2' }), `Collected ${money(s.fees_collected)}`),
+          h('div', null, h('span', { class: 'dot track' }), `Due ${money(Math.max(0, s.fees_total - s.fees_collected))}`))))));
+
+  main.append(h('div', { class: 'grid2' },
+    h('div', { class: 'card' }, cardTitle('building', 'Class-wise attendance'),
+      bars(s.class_attendance.map((c) => ({ label: c.name, value: c.present || 0, max: c.total || 0, text: c.total ? `${Math.round((c.present / c.total) * 100)}%` : '-' })), { pctKind: true })),
+    h('div', { class: 'card' }, cardTitle('list', 'Quick actions'), h('div', { class: 'row' },
+      [['students', 'Add student'], ['fees', 'Collect fee'], ['results', 'Results'], ['leave', 'Leave requests'], ['library', 'Issue book'], ['notices', 'Post notice'], ['id-cards', 'Print ID cards']]
+        .map(([id, label]) => h('a', { class: 'btn', href: `#${id}`, text: label }))))));
+}
 const departments = crudView({
   endpoint: '/api/admin/departments',
   fields: async () => [{ name: 'code', label: 'Code', required: true }, { name: 'name', label: 'Name', required: true }],
@@ -168,6 +132,7 @@ const studentFields = async () => [
   { name: 'email', label: 'Email', type: 'email' }, { name: 'phone', label: 'Phone' },
   { name: 'guardian_name', label: 'Guardian name' }, { name: 'guardian_phone', label: 'Guardian phone' },
   { name: 'dob', label: 'Date of birth', type: 'date' }, { name: 'admission_year', label: 'Admission year', type: 'number' },
+  { name: 'blood_group', label: 'Blood group', type: 'select', options: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((b) => ({ value: b, label: b })) },
   { name: 'address', label: 'Address', type: 'textarea', full: true },
 ];
 
@@ -203,7 +168,7 @@ function importButton(reload) {
         },
       });
       const card = h('div', { class: 'card' }, h('h2', { text: 'Import students' }), form, out);
-      document.querySelector('.main h1').after(card);
+      document.querySelector('.main .page-head').after(card);
     },
   });
 }
@@ -393,6 +358,12 @@ async function settings(main) {
   const s = await api('/api/admin/settings');
   main.append(h('div', { class: 'card' }, buildForm([
     { name: 'college_name', label: 'College name', required: true },
+    { name: 'college_short', label: 'Logo letters (max 4)', required: true },
+    { name: 'academic_session', label: 'Academic session', required: true, placeholder: '2026-27' },
+    { name: 'library_issue_days', label: 'Library: issue period (days)', type: 'number', min: 1, max: 180, required: true },
+    { name: 'library_fine_per_day', label: 'Library: late fine per day (Rs)', type: 'number', min: 0, step: '0.5', required: true },
+    { name: 'feedback_open', label: 'Faculty feedback form', type: 'select', required: true, options: [{ value: '1', label: 'Open for students' }, { value: '0', label: 'Closed' }] },
+    { name: 'feedback_cycle', label: 'Feedback cycle name', required: true, placeholder: '2026-27 Odd Sem' },
     { name: 'match_threshold', label: 'Face match strictness (0.30 - 0.70)', type: 'number', step: '0.01', min: 0.3, max: 0.7, required: true, hint: 'Lower = stricter (fewer wrong matches, more students missed). 0.50 is a good start; try 0.45 if look-alikes get mixed up.' },
     { name: 'min_face_confidence', label: 'Face detection confidence (0.20 - 0.95)', type: 'number', step: '0.05', min: 0.2, max: 0.95, required: true, hint: 'Lower finds more small or back-row faces but may count non-faces.' },
   ], { values: s, submitLabel: 'Save settings', onSubmit: async (d) => { await api('/api/admin/settings', { method: 'PUT', body: d }); toast('Settings saved'); } })));
@@ -405,20 +376,37 @@ async function auditLog(main) {
   ], await api('/api/admin/audit'))));
 }
 
+const subjectPairs = async () => {
+  const list = await api('/api/admin/assignments');
+  return list.map((a) => ({ value: `${a.class_id}:${a.subject_id}`, label: `${a.class_name} - ${a.subject_code} ${a.subject_name} (${a.teacher_name})` }));
+};
+
 startApp('admin', [
-  { id: 'dashboard', label: 'Dashboard', render: dashboard },
-  { id: 'students', label: 'Students', render: students },
-  { id: 'teachers', label: 'Teachers', render: teachers },
-  { id: 'classes', label: 'Classes', render: classes },
-  { id: 'subjects', label: 'Subjects', render: subjects },
-  { id: 'departments', label: 'Departments', render: departments },
-  { id: 'assignments', label: 'Subject allotment', render: assignments },
-  { id: 'faces', label: 'Face enrolment', render: enrollView('/api/admin/classes') },
-  { id: 'attendance', label: 'Attendance', render: attendance },
-  { id: 'timetable', label: 'Timetable', render: timetable },
-  { id: 'fees', label: 'Fee collection', render: feeCollection },
-  { id: 'fee-heads', label: 'Fee heads', render: feeHeads },
-  { id: 'notices', label: 'Notices', render: notices },
-  { id: 'settings', label: 'Settings', render: settings },
-  { id: 'audit', label: 'Audit log', render: auditLog },
-]);
+  { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', group: 'Overview', render: dashboard },
+  { id: 'students', label: 'Students', icon: 'students', group: 'Academics', render: students },
+  { id: 'teachers', label: 'Faculty', icon: 'teacher', group: 'Academics', render: teachers },
+  { id: 'classes', label: 'Classes', icon: 'building', group: 'Academics', render: classes },
+  { id: 'subjects', label: 'Subjects', icon: 'book', group: 'Academics', render: subjects },
+  { id: 'departments', label: 'Departments', icon: 'layers', group: 'Academics', render: departments },
+  { id: 'assignments', label: 'Subject allotment', icon: 'link', group: 'Academics', render: assignments },
+  { id: 'timetable', label: 'Timetable', icon: 'clock', group: 'Academics', render: timetable },
+  { id: 'attendance', label: 'Attendance', icon: 'check', group: 'Attendance', render: attendance },
+  { id: 'faces', label: 'Face enrolment', icon: 'scan', group: 'Attendance', render: enrollView('/api/admin/classes') },
+  { id: 'leave', label: 'Leave requests', icon: 'calendar', group: 'Attendance', render: leaveReview },
+  { id: 'results', label: 'Results', icon: 'award', group: 'Examination', render: resultsAdmin },
+  { id: 'marks-entry', label: 'Marks entry', icon: 'clipboard', group: 'Examination', render: async (main) => resultsSheet(main, await subjectPairs()) },
+  { id: 'fees', label: 'Fee collection', icon: 'wallet', group: 'Finance', render: feeCollection },
+  { id: 'fee-heads', label: 'Fee heads', icon: 'receipt', group: 'Finance', render: feeHeads },
+  { id: 'library', label: 'Library', icon: 'library', group: 'Campus', render: library },
+  { id: 'hostel', label: 'Hostel', icon: 'home', group: 'Campus', render: hostel },
+  { id: 'transport', label: 'Transport', icon: 'bus', group: 'Campus', render: transport },
+  { id: 'id-cards', label: 'ID cards', icon: 'id', group: 'Campus', render: idCards },
+  { id: 'notices', label: 'Notices', icon: 'bell', group: 'Communication', render: notices },
+  { id: 'grievances', label: 'Grievances', icon: 'alert', group: 'Communication', render: grievances },
+  { id: 'feedback', label: 'Faculty feedback', icon: 'star', group: 'Communication', render: feedbackSummary },
+  { id: 'settings', label: 'Settings', icon: 'settings', group: 'System', render: settings },
+  { id: 'audit', label: 'Audit log', icon: 'log', group: 'System', render: auditLog },
+]).then((ctx) => {
+  // Menu counters for things waiting on the admin.
+  api('/api/admin/stats').then((s) => { ctx.setBadge('leave', s.pending_leaves); ctx.setBadge('grievances', s.open_grievances); }).catch(() => {});
+});

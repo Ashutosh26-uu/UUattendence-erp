@@ -31,7 +31,30 @@ router.get('/stats', (req, res) => {
     sessions_today: count("SELECT COUNT(*) AS n FROM attendance_sessions WHERE date = ? AND status = 'submitted'", today()),
     sessions_open: count("SELECT COUNT(*) AS n FROM attendance_sessions WHERE status = 'open'"),
     fees_collected: one('SELECT COALESCE(SUM(amount), 0) AS n FROM fee_payments').n,
+    fees_total: one(`SELECT COALESCE(SUM(f.amount), 0) AS n FROM fee_structures f
+      JOIN students s ON s.class_id = f.class_id JOIN users u ON u.id = s.user_id WHERE u.active = 1`).n,
+    pending_leaves: count("SELECT COUNT(*) AS n FROM leave_requests WHERE status = 'pending'"),
+    open_grievances: count("SELECT COUNT(*) AS n FROM grievances WHERE status <> 'resolved'"),
+    books_issued: count('SELECT COUNT(*) AS n FROM book_issues WHERE returned_on IS NULL'),
+    hostel_residents: count('SELECT COUNT(*) AS n FROM hostel_allotments'),
+    bus_riders: count('SELECT COUNT(*) AS n FROM transport_allotments'),
+    // Daily attendance % over the last 14 days with classes.
+    attendance_trend: all(`SELECT a.date, SUM(m.status = 'present') AS present, COUNT(*) AS total FROM attendance_sessions a
+      JOIN attendance_marks m ON m.session_id = a.id WHERE a.status = 'submitted' GROUP BY a.date ORDER BY a.date DESC LIMIT 14`).reverse(),
+    class_attendance: all(`SELECT c.name, SUM(m.status = 'present') AS present, COUNT(m.student_id) AS total FROM classes c
+      LEFT JOIN attendance_sessions a ON a.class_id = c.id AND a.status = 'submitted' LEFT JOIN attendance_marks m ON m.session_id = a.id
+      GROUP BY c.id ORDER BY c.name`),
   });
+});
+
+// Data for printable student ID cards (photo = first enrolled face photo).
+router.get('/id-cards', (req, res) => {
+  const classId = int(req.query.classId, 'Class', req_);
+  res.json(all(`SELECT u.id, u.name, u.phone, s.roll_no, s.dob, s.blood_group, s.guardian_name, s.guardian_phone, s.address, s.admission_year,
+    c.name AS class_name, d.name AS department,
+    (SELECT f.photo FROM face_samples f WHERE f.student_id = u.id ORDER BY f.id LIMIT 1) AS photo
+    FROM students s JOIN users u ON u.id = s.user_id JOIN classes c ON c.id = s.class_id JOIN departments d ON d.id = c.department_id
+    WHERE s.class_id = ? AND u.active = 1 ORDER BY s.roll_no`, classId));
 });
 
 // ---- Master data ----
@@ -165,12 +188,13 @@ const studentProfile = (b) => [
   str(b.roll_no, 'Roll no', { required: true, max: 30 }), int(b.class_id, 'Class', req_),
   str(b.guardian_name, 'Guardian name'), str(b.guardian_phone, 'Guardian phone', { max: 20 }),
   date(b.dob, 'Date of birth'), str(b.address, 'Address', { max: 500 }), int(b.admission_year, 'Admission year', { min: 1950, max: 2100 }),
+  oneOf(b.blood_group || null, 'Blood group', ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']),
 ];
 
 router.get('/students', (req, res) => {
   const classId = int(req.query.classId, 'Class');
   res.json(all(`SELECT u.id, u.username, u.name, u.email, u.phone, u.active, s.roll_no, s.class_id, c.name AS class_name,
-    s.guardian_name, s.guardian_phone, s.dob, s.address, s.admission_year,
+    s.guardian_name, s.guardian_phone, s.dob, s.address, s.admission_year, s.blood_group,
     (SELECT COUNT(*) FROM face_samples f WHERE f.student_id = u.id) AS face_samples
     FROM students s JOIN users u ON u.id = s.user_id JOIN classes c ON c.id = s.class_id
     ${classId ? 'WHERE s.class_id = ?' : ''} ORDER BY c.name, s.roll_no`, ...(classId ? [classId] : [])));
@@ -181,8 +205,8 @@ router.post('/students', (req, res) => {
   const out = tx(() => {
     const p = studentProfile(body);
     const user = createUser('student', body);
-    run(`INSERT INTO students(user_id, roll_no, class_id, guardian_name, guardian_phone, dob, address, admission_year)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, user.id, ...p);
+    run(`INSERT INTO students(user_id, roll_no, class_id, guardian_name, guardian_phone, dob, address, admission_year, blood_group)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, user.id, ...p);
     return user;
   });
   audit(req.user.id, 'student_created', { id: out.id });
@@ -193,7 +217,7 @@ router.put('/students/:id', (req, res) => {
   const id = int(req.params.id, 'Id', req_);
   tx(() => {
     updateUser(id, 'student', req.body || {});
-    run(`UPDATE students SET roll_no = ?, class_id = ?, guardian_name = ?, guardian_phone = ?, dob = ?, address = ?, admission_year = ?
+    run(`UPDATE students SET roll_no = ?, class_id = ?, guardian_name = ?, guardian_phone = ?, dob = ?, address = ?, admission_year = ?, blood_group = ?
       WHERE user_id = ?`, ...studentProfile(req.body || {}), id);
   });
   audit(req.user.id, 'student_updated', { id });
@@ -356,6 +380,12 @@ router.put('/settings', (req, res) => {
   const b = req.body || {};
   const values = {
     college_name: str(b.college_name, 'College name', { required: true, max: 120 }),
+    college_short: str(b.college_short, 'Short name / logo letters', { required: true, max: 4 }),
+    academic_session: str(b.academic_session, 'Academic session', { required: true, max: 20 }),
+    library_fine_per_day: String(num(b.library_fine_per_day, 'Library fine per day', { required: true, min: 0, max: 1000 })),
+    library_issue_days: String(int(b.library_issue_days, 'Library issue days', { required: true, min: 1, max: 180 })),
+    feedback_open: b.feedback_open === '1' || b.feedback_open === 1 || b.feedback_open === true ? '1' : '0',
+    feedback_cycle: str(b.feedback_cycle, 'Feedback cycle', { required: true, max: 60 }),
     match_threshold: String(num(b.match_threshold, 'Match threshold', { required: true, min: 0.3, max: 0.7 })),
     min_face_confidence: String(num(b.min_face_confidence, 'Face detection confidence', { required: true, min: 0.2, max: 0.95 })),
   };

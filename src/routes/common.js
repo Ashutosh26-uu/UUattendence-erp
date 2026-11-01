@@ -8,7 +8,7 @@ const { assertClassAccess } = require('../access');
 const router = express.Router();
 
 router.get('/public-info', (req, res) => {
-  res.json({ college_name: getSetting('college_name') });
+  res.json({ college_name: getSetting('college_name'), college_short: getSetting('college_short'), academic_session: getSetting('academic_session') });
 });
 
 router.post('/login', (req, res) => {
@@ -16,7 +16,8 @@ router.post('/login', (req, res) => {
   const password = String(req.body?.password ?? '');
   const key = `${req.ip}|${username.toLowerCase()}`;
   if (!auth.loginAllowed(key)) throw new HttpError(429, 'Too many failed attempts. Try again in 10 minutes.');
-  const user = one('SELECT id, password_hash, role, name, active, must_change_pw FROM users WHERE username = ?', username);
+  const user = one(`SELECT u.id, u.password_hash, u.role, u.name, u.active, u.must_change_pw FROM users u
+    LEFT JOIN students s ON s.user_id = u.id WHERE u.username = ? OR s.roll_no = ? ORDER BY u.username = ? DESC LIMIT 1`, username, username, username);
   if (!user || !user.active || !auth.verifyPassword(password, user.password_hash)) {
     auth.loginFailed(key);
     audit(user?.id, 'login_failed', { username });
@@ -37,9 +38,11 @@ router.get('/me', auth.requireRole(), (req, res) => {
   const u = one('SELECT id, username, role, name, email, phone, must_change_pw FROM users WHERE id = ?', req.user.id);
   let profile = null;
   if (u.role === 'student') {
-    profile = one(`SELECT s.roll_no, s.class_id, c.name AS class_name, s.guardian_name, s.guardian_phone, s.dob, s.address, s.admission_year,
-      (SELECT COUNT(*) FROM face_samples f WHERE f.student_id = s.user_id) AS face_samples
-      FROM students s JOIN classes c ON c.id = s.class_id WHERE s.user_id = ?`, u.id);
+    profile = one(`SELECT s.roll_no, s.class_id, c.name AS class_name, c.semester, d.name AS department, s.guardian_name, s.guardian_phone,
+      s.dob, s.address, s.admission_year, s.blood_group,
+      (SELECT COUNT(*) FROM face_samples f WHERE f.student_id = s.user_id) AS face_samples,
+      (SELECT f.photo FROM face_samples f WHERE f.student_id = s.user_id ORDER BY f.id LIMIT 1) AS photo
+      FROM students s JOIN classes c ON c.id = s.class_id JOIN departments d ON d.id = c.department_id WHERE s.user_id = ?`, u.id);
   } else if (u.role === 'teacher') {
     profile = one(`SELECT t.employee_no, t.designation, d.name AS department FROM teachers t LEFT JOIN departments d ON d.id = t.department_id
       WHERE t.user_id = ?`, u.id);
@@ -47,6 +50,8 @@ router.get('/me', auth.requireRole(), (req, res) => {
   res.json({
     ...u, must_change_pw: !!u.must_change_pw, profile,
     college_name: getSetting('college_name'),
+    college_short: getSetting('college_short'),
+    academic_session: getSetting('academic_session'),
     min_face_confidence: Number(getSetting('min_face_confidence')) || 0.5,
   });
 });

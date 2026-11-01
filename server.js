@@ -41,6 +41,12 @@ app.use('/api/attendance', require('./src/routes/attendance'));
 app.use('/api/faces', require('./src/routes/faces'));
 app.use('/api/camera', require('./src/routes/camera'));
 app.use('/api/student', require('./src/routes/student'));
+app.use('/api/results', require('./src/routes/results'));
+app.use('/api/leave', require('./src/routes/leave'));
+app.use('/api/homework', require('./src/routes/homework'));
+app.use('/api/library', require('./src/routes/library'));
+app.use('/api/campus', require('./src/routes/campus'));
+app.use('/api/support', require('./src/routes/support'));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 // face-api.js (TensorFlow in the browser) and its model weights, served from node_modules.

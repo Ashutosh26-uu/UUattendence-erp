@@ -23,6 +23,22 @@ router.get('/assignments', (req, res) => {
     WHERE a.teacher_id = ? ORDER BY c.name, s.code`, req.user.id));
 });
 
+router.get('/summary', (req, res) => {
+  const n = (sql, ...p) => one(sql, ...p).n;
+  res.json({
+    pending_leaves: n(`SELECT COUNT(*) AS n FROM leave_requests l JOIN students s ON s.user_id = l.student_id
+      WHERE l.status = 'pending' AND s.class_id IN (SELECT class_id FROM assignments WHERE teacher_id = ?)`, req.user.id),
+    to_grade: n(`SELECT COUNT(*) AS n FROM homework_submissions x JOIN homework h ON h.id = x.homework_id WHERE h.teacher_id = ? AND x.marks IS NULL`, req.user.id),
+    students: n(`SELECT COUNT(DISTINCT s.user_id) AS n FROM students s JOIN users u ON u.id = s.user_id
+      WHERE u.active = 1 AND s.class_id IN (SELECT class_id FROM assignments WHERE teacher_id = ?)`, req.user.id),
+    sessions_month: n(`SELECT COUNT(*) AS n FROM attendance_sessions WHERE teacher_id = ? AND status = 'submitted' AND date >= date('now', '-30 days')`, req.user.id),
+    subject_attendance: all(`SELECT c.name AS class_name, sub.code, SUM(m.status = 'present') AS present, COUNT(m.student_id) AS total
+      FROM assignments a JOIN classes c ON c.id = a.class_id JOIN subjects sub ON sub.id = a.subject_id
+      LEFT JOIN attendance_sessions x ON x.class_id = a.class_id AND x.subject_id = a.subject_id AND x.status = 'submitted'
+      LEFT JOIN attendance_marks m ON m.session_id = x.id WHERE a.teacher_id = ? GROUP BY a.id ORDER BY c.name, sub.code`, req.user.id),
+  });
+});
+
 router.get('/classes', (req, res) => {
   res.json(all(`SELECT DISTINCT c.id, c.name, (c.camera_url IS NOT NULL AND c.camera_url <> '') AS has_camera
     FROM assignments a JOIN classes c ON c.id = a.class_id WHERE a.teacher_id = ? ORDER BY c.name`, req.user.id));

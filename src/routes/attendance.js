@@ -21,10 +21,11 @@ function sessionState(id) {
 
   const students = s.status === 'open'
     ? all(`SELECT u.id, u.name, st.roll_no, m.status, m.source, m.distance,
-        (SELECT COUNT(*) FROM face_samples f WHERE f.student_id = u.id) AS face_samples
+        (SELECT COUNT(*) FROM face_samples f WHERE f.student_id = u.id) AS face_samples,
+        EXISTS (SELECT 1 FROM leave_requests l WHERE l.student_id = u.id AND l.status = 'approved' AND ? BETWEEN l.from_date AND l.to_date) AS on_leave
         FROM students st JOIN users u ON u.id = st.user_id
         LEFT JOIN attendance_marks m ON m.session_id = ? AND m.student_id = u.id
-        WHERE st.class_id = ? AND u.active = 1 ORDER BY st.roll_no`, id, s.class_id)
+        WHERE st.class_id = ? AND u.active = 1 ORDER BY st.roll_no`, s.date, id, s.class_id)
     : all(`SELECT u.id, u.name, st.roll_no, m.status, m.source, m.distance, 0 AS face_samples
         FROM attendance_marks m JOIN users u ON u.id = m.student_id JOIN students st ON st.user_id = m.student_id
         WHERE m.session_id = ? ORDER BY st.roll_no`, id);

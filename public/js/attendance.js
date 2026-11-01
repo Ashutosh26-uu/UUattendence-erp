@@ -44,6 +44,8 @@ function statusBadge(s) {
   return h('span', { class: `badge ${s.status === 'present' ? 'ok' : 'bad'}`, text: s.status === 'present' ? 'Present' : 'Absent' });
 }
 
+const leaveBadge = (s) => (s.on_leave ? h('span', { class: 'badge primary', text: 'On approved leave' }) : null);
+
 function sourceText(s) {
   if (s.source === 'camera') return `Camera (match ${Math.round((1 - s.distance) * 100)}%)`;
   if (s.source === 'manual') return 'Marked by hand';
@@ -54,7 +56,7 @@ function sourceText(s) {
 async function sessionScreen(main, ctx, id) {
   let state = await api(`/api/attendance/sessions/${id}`);
   const s = state.session;
-  main.firstChild.textContent = `Attendance: ${s.class_name}`;
+  main.querySelector('.page-head h1').textContent = `Attendance: ${s.class_name}`;
   main.append(h('div', { class: 'between' },
     h('div', null, h('div', { text: `${s.subject_code} ${s.subject_name}` }), h('div', { class: 'muted small', text: `${fmtDate(s.date)} · started ${fmtDateTime(s.started_at)}` })),
     h('a', { class: 'btn', href: '#attendance', text: 'Back' })));
@@ -174,7 +176,7 @@ async function sessionScreen(main, ctx, id) {
     const rows = state.students.filter((st) => !q || st.name.toLowerCase().includes(q) || st.roll_no.toLowerCase().includes(q));
     listBox.replaceChildren(table([
       { label: 'Roll no', key: 'roll_no' },
-      { label: 'Name', render: (st) => h('span', null, st.name, open && !st.face_samples ? h('span', { class: 'badge warn', text: 'no face photo' }) : null) },
+      { label: 'Name', render: (st) => h('span', { class: 'row' }, st.name, open && !st.face_samples ? h('span', { class: 'badge warn', text: 'no face photo' }) : null, leaveBadge(st)) },
       { label: 'Status', render: statusBadge },
       { label: 'How', render: (st) => h('span', { class: 'small muted', text: sourceText(st) }) },
       open && { label: '', class: 'actions', render: (st) => h('span', { class: 'row' },

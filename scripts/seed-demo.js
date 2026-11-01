@@ -48,7 +48,10 @@ function seedDemo() {
       const roll = `BCA3${'AB'[ci]}${String(i + 1).padStart(2, '0')}`;
       const name = `${FIRST[(i + ci * 5) % FIRST.length]} ${LAST[(i * 3 + ci) % LAST.length]}`;
       const u = id(run("INSERT INTO users(username, password_hash, role, name, must_change_pw) VALUES (?, ?, 'student', ?, 0)", roll.toLowerCase(), hash, name));
-      run('INSERT INTO students(user_id, roll_no, class_id, guardian_name, admission_year) VALUES (?, ?, ?, ?, 2025)', u, roll, c, `Mr. ${name.split(' ')[1]}`);
+      run(`INSERT INTO students(user_id, roll_no, class_id, guardian_name, guardian_phone, dob, admission_year, blood_group, address)
+        VALUES (?, ?, ?, ?, ?, ?, 2025, ?, 'Dehradun, Uttarakhand')`, u, roll, c, `Mr. ${name.split(' ')[1]}`,
+      `98${String(37000000 + i * 1013 + ci * 7).padStart(8, '0')}`, `2006-${String((i % 12) + 1).padStart(2, '0')}-${String((i * 2) % 27 + 1).padStart(2, '0')}`,
+      ['A+', 'B+', 'O+', 'AB+', 'B-', 'O-'][i % 6]);
       if (i === 0) logins.push(`student  ${roll.toLowerCase()}`);
       return u;
     }));
@@ -86,6 +89,61 @@ function seedDemo() {
         run('UPDATE attendance_sessions SET last_faces = ?, max_faces = ? WHERE id = ?', present, present, s);
       }));
     }
+
+    // Previous semester (Sem 2) result, published, so grade cards and CGPA have data.
+    const sem2 = [['BCA201', 'Object Oriented Programming'], ['BCA202', 'Discrete Mathematics'], ['BCA203', 'Computer Networks']]
+      .map(([code, name]) => id(run('INSERT INTO subjects(code, name, department_id, credits) VALUES (?, ?, ?, 4)', code, name, dept)));
+    classes.forEach((c, ci) => {
+      studentsByClass[ci].forEach((st, k) => sem2.forEach((sub, si) => {
+        const internal = 22 + ((k * 5 + si * 3) % 17);
+        const external = k % 11 === 7 && si === 1 ? 18 : 28 + ((k * 7 + si * 11) % 31);
+        run('INSERT INTO result_entries(student_id, subject_id, semester, class_id, internal, external) VALUES (?, ?, 2, ?, ?, ?)', st, sub, c, internal, external);
+      }));
+      run('INSERT INTO result_publish(class_id, semester) VALUES (?, 2)', c);
+      // Current semester: internals entered by teachers, externals pending.
+      studentsByClass[ci].forEach((st, k) => subjects.forEach((sub, si) => run(
+        'INSERT INTO result_entries(student_id, subject_id, semester, class_id, internal) VALUES (?, ?, 3, ?, ?)', st, sub, c, 24 + ((k * 3 + si * 5) % 15))));
+    });
+
+    // Assignments, some already submitted and graded.
+    const isoDay = (offset) => new Date(Date.now() + offset * 864e5).toISOString().slice(0, 10);
+    classes.forEach((c, ci) => {
+      const hw1 = id(run(`INSERT INTO homework(class_id, subject_id, teacher_id, title, description, due_date, max_marks)
+        VALUES (?, ?, ?, 'Linked list programs', 'Write C programs for insertion and deletion in a singly linked list.', ?, 10)`, c, subjects[0], teachers[0], isoDay(-5)));
+      run(`INSERT INTO homework(class_id, subject_id, teacher_id, title, description, due_date, max_marks)
+        VALUES (?, ?, ?, 'ER diagram for a library', 'Draw an ER diagram for a college library system and convert it to tables.', ?, 20)`, c, subjects[1], teachers[0], isoDay(4));
+      run(`INSERT INTO homework(class_id, subject_id, teacher_id, title, description, due_date, max_marks)
+        VALUES (?, ?, ?, 'CPU scheduling numericals', 'Solve the 5 FCFS / SJF / Round Robin questions from unit 2.', ?, 10)`, c, subjects[2], teachers[1], isoDay(7));
+      studentsByClass[ci].slice(0, 8).forEach((st, k) => run(`INSERT INTO homework_submissions(homework_id, student_id, answer, submitted_at, marks, feedback)
+        VALUES (?, ?, 'Programs attached in the answer below.', ?, ?, ?)`, hw1, st, `${isoDay(-6)} 18:00:00`, k < 5 ? 6 + (k % 5) : null, k < 5 ? 'Good work' : null));
+    });
+
+    // Library
+    const books = [['LIB0001', 'Data Structures Using C', 'Reema Thareja', 'Computer Science', 5], ['LIB0002', 'Database System Concepts', 'Silberschatz, Korth', 'Computer Science', 4],
+      ['LIB0003', 'Operating System Concepts', 'Silberschatz, Galvin', 'Computer Science', 4], ['LIB0004', 'Let Us C', 'Yashavant Kanetkar', 'Programming', 6],
+      ['LIB0005', 'Computer Networks', 'Andrew Tanenbaum', 'Computer Science', 3], ['LIB0006', 'Discrete Mathematics', 'Kenneth Rosen', 'Mathematics', 3],
+      ['LIB0007', 'Wings of Fire', 'A. P. J. Abdul Kalam', 'General', 2], ['LIB0008', 'Introduction to Algorithms', 'Cormen et al.', 'Computer Science', 2]]
+      .map(([acc, title, author, cat, copies], i) => id(run('INSERT INTO books(accession_no, title, author, category, copies, shelf) VALUES (?, ?, ?, ?, ?, ?)', acc, title, author, cat, copies, `R${1 + (i % 4)}`)));
+    run('INSERT INTO book_issues(book_id, user_id, issued_on, due_on) VALUES (?, ?, ?, ?)', books[0], studentsByClass[0][0], isoDay(-20), isoDay(-6));
+    run('INSERT INTO book_issues(book_id, user_id, issued_on, due_on) VALUES (?, ?, ?, ?)', books[3], studentsByClass[0][0], isoDay(-3), isoDay(11));
+    run('INSERT INTO book_issues(book_id, user_id, issued_on, due_on) VALUES (?, ?, ?, ?)', books[1], studentsByClass[1][2], isoDay(-10), isoDay(4));
+
+    // Hostel and transport
+    const boys = id(run("INSERT INTO hostels(name, type, warden_name, warden_phone) VALUES ('Aryabhatta Hostel', 'boys', 'Mr. R. K. Negi', '9837011111')"));
+    const girls = id(run("INSERT INTO hostels(name, type, warden_name, warden_phone) VALUES ('Gargi Hostel', 'girls', 'Mrs. S. Bisht', '9837022222')"));
+    const rooms = [boys, girls].map((h) => [101, 102, 103, 104].map((no) => id(run('INSERT INTO hostel_rooms(hostel_id, room_no, capacity) VALUES (?, ?, 3)', h, String(no)))));
+    studentsByClass[0].slice(0, 6).forEach((st, k) => run('INSERT INTO hostel_allotments(student_id, room_id) VALUES (?, ?)', st, rooms[k % 2][Math.floor(k / 2) % 4]));
+    const r1 = id(run("INSERT INTO bus_routes(name, bus_no, driver_name, driver_phone, departure_time, stops) VALUES ('Route 1 - ISBT', 'UK07 PA 1234', 'Ramesh Kumar', '9837033333', '07:30', 'ISBT, Clock Tower, Rajpur Road, Campus')"));
+    const r2 = id(run("INSERT INTO bus_routes(name, bus_no, driver_name, driver_phone, departure_time, stops) VALUES ('Route 2 - Prem Nagar', 'UK07 PA 5678', 'Suresh Rawat', '9837044444', '07:45', 'Prem Nagar, Ballupur, Kaulagarh, Campus')"));
+    studentsByClass[0].slice(6, 10).forEach((st, k) => run('INSERT INTO transport_allotments(student_id, route_id, stop) VALUES (?, ?, ?)', st, k % 2 ? r2 : r1, k % 2 ? 'Ballupur' : 'Clock Tower'));
+
+    // Leave, feedback, grievance
+    run("INSERT INTO leave_requests(student_id, from_date, to_date, leave_type, reason) VALUES (?, ?, ?, 'medical', 'Viral fever, doctor advised rest.')", studentsByClass[0][1], isoDay(1), isoDay(3));
+    run("INSERT INTO leave_requests(student_id, from_date, to_date, leave_type, reason, status, reviewed_by, reviewed_at) VALUES (?, ?, ?, 'family', 'Sister''s wedding', 'approved', ?, datetime('now'))", studentsByClass[0][0], isoDay(-12), isoDay(-11), teachers[0]);
+    studentsByClass.flat().slice(2, 16).forEach((st, k) => subjects.forEach((sub, si) => run(`INSERT INTO feedback(student_id, teacher_id, subject_id, cycle, q1, q2, q3, q4, q5, comment)
+      VALUES (?, ?, ?, '2026-27 Odd Sem', ?, ?, ?, ?, ?, ?)`, st, si === 2 ? teachers[1] : teachers[0], sub, 3 + ((k + si) % 3), 4 + (k % 2), 3 + ((k * si) % 3), 4, 3 + ((k + 1) % 3),
+    k === 3 && si === 0 ? 'Please share more practice questions before tests.' : null)));
+    run("INSERT INTO grievances(user_id, category, subject, description) VALUES (?, 'infrastructure', 'Projector not working in LT-101', 'The projector in LT-101 has not worked for a week, so slides cannot be shown.')", studentsByClass[0][3]);
 
     const admin = one("SELECT id FROM users WHERE role = 'admin'");
     run("INSERT INTO notices(title, body, audience, created_by) VALUES ('Camera attendance starts this week', 'Attendance in all BCA classes is now taken by the classroom camera. Students without a face photo should meet their class teacher.', 'all', ?)", admin?.id ?? null);

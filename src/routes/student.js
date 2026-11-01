@@ -42,6 +42,12 @@ router.get('/dashboard', (req, res) => {
     attendance: studentAttendance(req.user.id),
     fees: { total: f.total, paid: f.paid, due: f.due },
     recent_marks: marks(req.user.id).filter((m) => m.marks != null).slice(0, 5),
+    homework_due: all(`SELECT h.id, h.title, h.due_date, s.code AS subject_code FROM homework h JOIN subjects s ON s.id = h.subject_id
+      JOIN students st ON st.class_id = h.class_id AND st.user_id = ?
+      WHERE NOT EXISTS (SELECT 1 FROM homework_submissions x WHERE x.homework_id = h.id AND x.student_id = st.user_id)
+      ORDER BY h.due_date LIMIT 5`, req.user.id),
+    books_out: one('SELECT COUNT(*) AS n FROM book_issues WHERE user_id = ? AND returned_on IS NULL', req.user.id).n,
+    last_leave: one('SELECT from_date, to_date, status FROM leave_requests WHERE student_id = ? ORDER BY id DESC LIMIT 1', req.user.id) || null,
   });
 });
 
