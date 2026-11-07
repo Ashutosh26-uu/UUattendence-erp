@@ -1,351 +1,257 @@
-const { DatabaseSync } = require('node:sqlite');
+// PostgreSQL access. Production: set DATABASE_URL (a real PostgreSQL server, connection pool).
+// Development: without DATABASE_URL an embedded PostgreSQL (PGlite) is stored in data/pgdata.
+// Both speak the same SQL, so the rest of the code does not care which one runs.
 const fs = require('node:fs');
 const path = require('node:path');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new DatabaseSync(path.join(DATA_DIR, 'erp.db'));
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+let impl;
 
-db.exec(`
+async function connect() {
+  if (impl) return impl;
+  if (process.env.DATABASE_URL) {
+    const { Pool } = require('pg');
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: Number(process.env.DB_POOL_SIZE) || 20,
+      ssl: process.env.DATABASE_SSL === '0' ? false : (/localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false }),
+    });
+    impl = {
+      mode: 'postgresql',
+      query: (text, params) => pool.query(text, params),
+      async tx(fn) {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          const out = await fn({ query: (t, p) => client.query(t, p) });
+          await client.query('COMMIT');
+          return out;
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
+      },
+      close: () => pool.end(),
+    };
+  } else {
+    const { PGlite } = await import('@electric-sql/pglite');
+    const pg = new PGlite(path.join(DATA_DIR, 'pgdata'));
+    await pg.waitReady;
+    impl = {
+      mode: 'embedded (PGlite)',
+      query: (text, params) => pg.query(text, params),
+      tx: (fn) => pg.transaction((t) => fn({ query: (q, p) => t.query(q, p) })),
+      close: () => pg.close(),
+    };
+  }
+  await migrate();
+  return impl;
+}
+
+const query = async (text, params = []) => (await impl.query(text, params)).rows;
+const one = async (text, params = []) => (await impl.query(text, params)).rows[0] || null;
+const tx = (fn) => impl.tx(async (c) => fn({
+  query: async (t, p = []) => (await c.query(t, p)).rows,
+  one: async (t, p = []) => (await c.query(t, p)).rows[0] || null,
+}));
+
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY,
-  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  id SERIAL PRIMARY KEY,
+  username TEXT NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin','teacher','student')),
+  role TEXT NOT NULL CHECK (role IN ('super_admin','admin','teacher')),
   name TEXT NOT NULL,
   email TEXT,
   phone TEXT,
-  active INTEGER NOT NULL DEFAULT 1,
-  must_change_pw INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  must_change_pw BOOLEAN NOT NULL DEFAULT TRUE,
+  token_version INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS sessions (
-  token_hash TEXT PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at INTEGER NOT NULL
-);
+CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users (lower(username));
+
 CREATE TABLE IF NOT EXISTS departments (
-  id INTEGER PRIMARY KEY,
-  code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  id SERIAL PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS classes (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
   department_id INTEGER NOT NULL REFERENCES departments(id),
-  semester INTEGER,
+  program TEXT,
+  semester SMALLINT,
   section TEXT,
-  academic_year TEXT,
-  room TEXT,
+  academic_year TEXT
+);
+CREATE TABLE IF NOT EXISTS rooms (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  building TEXT,
+  capacity INTEGER,
   camera_url TEXT
 );
 CREATE TABLE IF NOT EXISTS subjects (
-  id INTEGER PRIMARY KEY,
-  code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  id SERIAL PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
-  department_id INTEGER REFERENCES departments(id),
-  credits INTEGER
+  department_id INTEGER REFERENCES departments(id)
 );
 CREATE TABLE IF NOT EXISTS teachers (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-  employee_no TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  employee_no TEXT NOT NULL UNIQUE,
   department_id INTEGER REFERENCES departments(id),
   designation TEXT
 );
 CREATE TABLE IF NOT EXISTS students (
-  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-  roll_no TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  id SERIAL PRIMARY KEY,
+  roll_no TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
   class_id INTEGER NOT NULL REFERENCES classes(id),
-  guardian_name TEXT,
+  email TEXT,
+  phone TEXT,
   guardian_phone TEXT,
-  dob TEXT,
-  address TEXT,
-  admission_year INTEGER
+  active BOOLEAN NOT NULL DEFAULT TRUE
 );
-CREATE TABLE IF NOT EXISTS assignments (
-  id INTEGER PRIMARY KEY,
-  teacher_id INTEGER NOT NULL REFERENCES teachers(user_id),
-  class_id INTEGER NOT NULL REFERENCES classes(id),
-  subject_id INTEGER NOT NULL REFERENCES subjects(id),
-  UNIQUE (class_id, subject_id)
-);
-CREATE TABLE IF NOT EXISTS timetable (
-  id INTEGER PRIMARY KEY,
-  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
-  day INTEGER NOT NULL CHECK (day BETWEEN 1 AND 7),
-  start_time TEXT NOT NULL,
-  end_time TEXT NOT NULL,
-  subject_id INTEGER NOT NULL REFERENCES subjects(id),
-  room TEXT
-);
+CREATE INDEX IF NOT EXISTS students_class ON students (class_id) WHERE active;
+
 CREATE TABLE IF NOT EXISTS face_samples (
-  id INTEGER PRIMARY KEY,
-  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
-  descriptor BLOB NOT NULL,
+  id SERIAL PRIMARY KEY,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  descriptor BYTEA NOT NULL,
   photo TEXT,
   created_by INTEGER REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_face_student ON face_samples(student_id);
+CREATE INDEX IF NOT EXISTS face_student ON face_samples (student_id);
+
+-- Lecture allotment: which teacher teaches which class + subject, when and where.
+CREATE TABLE IF NOT EXISTS lectures (
+  id SERIAL PRIMARY KEY,
+  teacher_id INTEGER NOT NULL REFERENCES users(id),
+  class_id INTEGER NOT NULL REFERENCES classes(id),
+  subject_id INTEGER NOT NULL REFERENCES subjects(id),
+  room_id INTEGER REFERENCES rooms(id),
+  day SMALLINT NOT NULL CHECK (day BETWEEN 1 AND 7),
+  start_time TIME NOT NULL,
+  end_time TIME NOT NULL CHECK (end_time > start_time)
+);
+CREATE INDEX IF NOT EXISTS lectures_teacher ON lectures (teacher_id, day);
+
 CREATE TABLE IF NOT EXISTS attendance_sessions (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
+  lecture_id INTEGER NOT NULL REFERENCES lectures(id),
   class_id INTEGER NOT NULL REFERENCES classes(id),
   subject_id INTEGER NOT NULL REFERENCES subjects(id),
   teacher_id INTEGER NOT NULL REFERENCES users(id),
-  date TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','submitted','cancelled')),
+  room_id INTEGER REFERENCES rooms(id),
+  date DATE NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('scanning','review','queued','saved','cancelled')),
   registered_count INTEGER NOT NULL DEFAULT 0,
-  last_faces INTEGER,
-  max_faces INTEGER,
-  captures INTEGER NOT NULL DEFAULT 0,
-  started_at TEXT NOT NULL DEFAULT (datetime('now')),
-  submitted_at TEXT
+  max_faces INTEGER NOT NULL DEFAULT 0,
+  recognised_count INTEGER NOT NULL DEFAULT 0,
+  present_count INTEGER,
+  frames INTEGER NOT NULL DEFAULT 0,
+  scan_result JSONB,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  scan_ends_at TIMESTAMPTZ NOT NULL,
+  submitted_at TIMESTAMPTZ,
+  saved_at TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_att_class ON attendance_sessions(class_id, subject_id, date);
-CREATE TABLE IF NOT EXISTS attendance_marks (
-  session_id INTEGER NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
-  student_id INTEGER NOT NULL REFERENCES students(user_id),
-  status TEXT NOT NULL CHECK (status IN ('present','absent')),
+CREATE UNIQUE INDEX IF NOT EXISTS one_attendance_per_lecture_day ON attendance_sessions (lecture_id, date) WHERE status <> 'cancelled';
+CREATE INDEX IF NOT EXISTS sessions_class_date ON attendance_sessions (class_id, date);
+CREATE INDEX IF NOT EXISTS sessions_teacher ON attendance_sessions (teacher_id, date);
+
+CREATE TABLE IF NOT EXISTS attendance_records (
+  session_id BIGINT NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES students(id),
+  status CHAR(1) NOT NULL CHECK (status IN ('P','A')),
   source TEXT NOT NULL CHECK (source IN ('camera','manual','auto')),
-  distance REAL,
-  marked_at TEXT NOT NULL DEFAULT (datetime('now')),
+  confidence REAL,
   PRIMARY KEY (session_id, student_id)
 );
-CREATE INDEX IF NOT EXISTS idx_marks_student ON attendance_marks(student_id);
-CREATE TABLE IF NOT EXISTS exams (
-  id INTEGER PRIMARY KEY,
-  class_id INTEGER NOT NULL REFERENCES classes(id),
-  subject_id INTEGER NOT NULL REFERENCES subjects(id),
-  name TEXT NOT NULL,
-  max_marks REAL NOT NULL CHECK (max_marks > 0),
-  exam_date TEXT,
-  created_by INTEGER REFERENCES users(id)
+CREATE INDEX IF NOT EXISTS records_student ON attendance_records (student_id);
+
+-- Write-behind queue: final attendance waits here during peak load.
+CREATE TABLE IF NOT EXISTS attendance_queue (
+  id BIGSERIAL PRIMARY KEY,
+  session_id BIGINT NOT NULL REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+  payload JSONB NOT NULL,
+  enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  done_at TIMESTAMPTZ
 );
-CREATE TABLE IF NOT EXISTS marks (
-  exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-  student_id INTEGER NOT NULL REFERENCES students(user_id),
-  marks REAL NOT NULL,
-  PRIMARY KEY (exam_id, student_id)
-);
-CREATE TABLE IF NOT EXISTS fee_structures (
-  id INTEGER PRIMARY KEY,
-  class_id INTEGER NOT NULL REFERENCES classes(id),
+CREATE INDEX IF NOT EXISTS queue_pending ON attendance_queue (enqueued_at) WHERE done_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
-  amount REAL NOT NULL CHECK (amount >= 0),
-  due_date TEXT
+  body TEXT,
+  link TEXT,
+  read BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS fee_payments (
-  id INTEGER PRIMARY KEY,
-  student_id INTEGER NOT NULL REFERENCES students(user_id),
-  fee_id INTEGER NOT NULL REFERENCES fee_structures(id),
-  amount REAL NOT NULL CHECK (amount > 0),
-  paid_on TEXT NOT NULL,
-  mode TEXT,
-  receipt_no TEXT NOT NULL UNIQUE,
-  recorded_by INTEGER REFERENCES users(id)
-);
-CREATE TABLE IF NOT EXISTS notices (
-  id INTEGER PRIMARY KEY,
-  title TEXT NOT NULL,
-  body TEXT NOT NULL,
-  audience TEXT NOT NULL DEFAULT 'all' CHECK (audience IN ('all','teacher','student')),
-  created_by INTEGER REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
+CREATE INDEX IF NOT EXISTS notifications_user ON notifications (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_log (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   user_id INTEGER,
   action TEXT NOT NULL,
-  detail TEXT,
-  at TEXT NOT NULL DEFAULT (datetime('now'))
+  detail JSONB,
+  at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-`);
-
-// ---- Academic and campus modules ----
-db.exec(`
-CREATE TABLE IF NOT EXISTS result_entries (
-  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
-  subject_id INTEGER NOT NULL REFERENCES subjects(id),
-  semester INTEGER NOT NULL,
-  class_id INTEGER NOT NULL REFERENCES classes(id),
-  internal REAL,
-  external REAL,
-  updated_by INTEGER REFERENCES users(id),
-  PRIMARY KEY (student_id, subject_id, semester)
-);
-CREATE TABLE IF NOT EXISTS result_publish (
-  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
-  semester INTEGER NOT NULL,
-  published_at TEXT NOT NULL DEFAULT (datetime('now')),
-  PRIMARY KEY (class_id, semester)
-);
-CREATE TABLE IF NOT EXISTS leave_requests (
-  id INTEGER PRIMARY KEY,
-  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
-  from_date TEXT NOT NULL,
-  to_date TEXT NOT NULL,
-  leave_type TEXT NOT NULL DEFAULT 'personal',
-  reason TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
-  remark TEXT,
-  reviewed_by INTEGER REFERENCES users(id),
-  reviewed_at TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS homework (
-  id INTEGER PRIMARY KEY,
-  class_id INTEGER NOT NULL REFERENCES classes(id),
-  subject_id INTEGER NOT NULL REFERENCES subjects(id),
-  teacher_id INTEGER NOT NULL REFERENCES users(id),
-  title TEXT NOT NULL,
-  description TEXT,
-  due_date TEXT NOT NULL,
-  max_marks REAL NOT NULL DEFAULT 10,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS homework_submissions (
-  homework_id INTEGER NOT NULL REFERENCES homework(id) ON DELETE CASCADE,
-  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
-  answer TEXT,
-  file_name TEXT,
-  file_type TEXT,
-  file_data BLOB,
-  submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
-  marks REAL,
-  feedback TEXT,
-  PRIMARY KEY (homework_id, student_id)
-);
-CREATE TABLE IF NOT EXISTS books (
-  id INTEGER PRIMARY KEY,
-  accession_no TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  isbn TEXT,
-  title TEXT NOT NULL,
-  author TEXT,
-  category TEXT,
-  copies INTEGER NOT NULL DEFAULT 1 CHECK (copies >= 0),
-  shelf TEXT
-);
-CREATE TABLE IF NOT EXISTS book_issues (
-  id INTEGER PRIMARY KEY,
-  book_id INTEGER NOT NULL REFERENCES books(id),
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  issued_on TEXT NOT NULL,
-  due_on TEXT NOT NULL,
-  returned_on TEXT,
-  fine REAL NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS hostels (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  type TEXT NOT NULL DEFAULT 'boys' CHECK (type IN ('boys','girls')),
-  warden_name TEXT,
-  warden_phone TEXT
-);
-CREATE TABLE IF NOT EXISTS hostel_rooms (
-  id INTEGER PRIMARY KEY,
-  hostel_id INTEGER NOT NULL REFERENCES hostels(id) ON DELETE CASCADE,
-  room_no TEXT NOT NULL,
-  capacity INTEGER NOT NULL DEFAULT 2 CHECK (capacity > 0),
-  UNIQUE (hostel_id, room_no)
-);
-CREATE TABLE IF NOT EXISTS hostel_allotments (
-  student_id INTEGER PRIMARY KEY REFERENCES students(user_id) ON DELETE CASCADE,
-  room_id INTEGER NOT NULL REFERENCES hostel_rooms(id),
-  allotted_on TEXT NOT NULL DEFAULT (date('now'))
-);
-CREATE TABLE IF NOT EXISTS bus_routes (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  bus_no TEXT,
-  driver_name TEXT,
-  driver_phone TEXT,
-  stops TEXT,
-  departure_time TEXT
-);
-CREATE TABLE IF NOT EXISTS transport_allotments (
-  student_id INTEGER PRIMARY KEY REFERENCES students(user_id) ON DELETE CASCADE,
-  route_id INTEGER NOT NULL REFERENCES bus_routes(id),
-  stop TEXT
-);
-CREATE TABLE IF NOT EXISTS feedback (
-  id INTEGER PRIMARY KEY,
-  student_id INTEGER NOT NULL REFERENCES students(user_id) ON DELETE CASCADE,
-  teacher_id INTEGER NOT NULL REFERENCES users(id),
-  subject_id INTEGER NOT NULL REFERENCES subjects(id),
-  cycle TEXT NOT NULL,
-  q1 INTEGER NOT NULL, q2 INTEGER NOT NULL, q3 INTEGER NOT NULL, q4 INTEGER NOT NULL, q5 INTEGER NOT NULL,
-  comment TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (student_id, subject_id, cycle)
-);
-CREATE TABLE IF NOT EXISTS grievances (
-  id INTEGER PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  category TEXT NOT NULL,
-  subject TEXT NOT NULL,
-  description TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','in_progress','resolved')),
-  response TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-`);
-
-// Columns added after the first release.
-const hasColumn = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
-if (!hasColumn('students', 'blood_group')) db.exec('ALTER TABLE students ADD COLUMN blood_group TEXT');
+`;
 
 const DEFAULT_SETTINGS = {
-  college_name: 'UU College',
-  college_short: 'UU',
-  academic_session: '2026-27',
+  university_name: 'United University, Prayagraj',
+  scan_minutes: '5',
+  frame_interval_seconds: '3',
   match_threshold: '0.5',
   min_face_confidence: '0.5',
-  library_fine_per_day: '2',
-  library_issue_days: '14',
-  feedback_open: '1',
-  feedback_cycle: '2026-27 Odd Sem',
+  queue_threshold: '500',
+  queue_deadline_minutes: '45',
 };
-for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
-  db.prepare('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)').run(key, value);
-}
 
-const one = (sql, ...params) => db.prepare(sql).get(...params);
-const all = (sql, ...params) => db.prepare(sql).all(...params);
-const run = (sql, ...params) => db.prepare(sql).run(...params);
+let settingsCache = null;
 
-function tx(fn) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
+async function migrate() {
+  for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) {
+    await impl.query(stmt.replace(/^--.*$/gm, '').trim());
+  }
+  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
+    await impl.query('INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [k, v]);
   }
 }
 
+// Settings are read on every scan frame, so they are cached; writes refresh the cache.
+async function getSettings() {
+  if (!settingsCache) {
+    settingsCache = { ...DEFAULT_SETTINGS };
+    for (const r of await query('SELECT key, value FROM settings')) settingsCache[r.key] = r.value;
+  }
+  return settingsCache;
+}
+async function setSettings(values) {
+  await tx(async (t) => {
+    for (const [k, v] of Object.entries(values)) {
+      await t.query('INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [k, String(v)]);
+    }
+  });
+  settingsCache = null;
+}
+
 function audit(userId, action, detail) {
-  run('INSERT INTO audit_log(user_id, action, detail) VALUES (?, ?, ?)',
-    userId ?? null, action, detail == null ? null : (typeof detail === 'string' ? detail : JSON.stringify(detail)));
+  // Fire-and-forget: an audit row must never slow down or fail the request.
+  query('INSERT INTO audit_log(user_id, action, detail) VALUES ($1, $2, $3)', [userId ?? null, action, detail == null ? null : JSON.stringify(detail)])
+    .catch((err) => console.error('audit failed', err.message));
 }
 
-function getSetting(key) {
-  const row = one('SELECT value FROM settings WHERE key = ?', key);
-  return row ? row.value : DEFAULT_SETTINGS[key];
-}
-
-function getSettings() {
-  const out = { ...DEFAULT_SETTINGS };
-  for (const row of all('SELECT key, value FROM settings')) out[row.key] = row.value;
-  return out;
-}
-
-module.exports = { db, one, all, run, tx, audit, getSetting, getSettings, DATA_DIR, DEFAULT_SETTINGS };
+module.exports = { connect, query, one, tx, audit, getSettings, setSettings, DATA_DIR, DEFAULT_SETTINGS, mode: () => impl?.mode };

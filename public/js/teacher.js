@@ -1,175 +1,296 @@
-import { h, api, toast, busy, confirmBox, table, buildForm, selectEl, startApp, fmtDate, pctBadge, timetableView, noticesView, DAYS, statCard, cardTitle, bars, avatar, icon } from './common.js';
-import { leaveReview, resultsSheet, feedbackSummary, myGrievances } from './modules.js';
-import { homeworkTeacher } from './homework.js';
-import { attendanceView } from './attendance.js';
-import { enrollView } from './enroll.js';
+import {
+  h, api, toast, busy, confirmBox, table, startApp, icon, statCard, cardTitle, DAYS, fmtDate, fmtTime, initials,
+} from './common.js';
 
-const assignmentOptions = (list) => list.map((a) => ({ value: `${a.class_id}:${a.subject_id}`, label: `${a.class_name} - ${a.subject_code} ${a.subject_name}` }));
+const statusBadge = (s, present, total) => {
+  if (!s) return h('span', { class: 'badge', text: 'Not taken' });
+  const map = { scanning: ['red', 'Scanning'], review: ['warn', 'Waiting for submit'], queued: ['navy', 'Saving (queued)'], saved: ['ok', `Saved ${present ?? ''}${total ? `/${total}` : ''}`], cancelled: ['', 'Cancelled'] };
+  const [k, t] = map[s] || ['', s];
+  return h('span', { class: `badge ${k}`, text: t });
+};
 
-async function dashboard(main, ctx) {
-  const [assignments, tt, sum] = await Promise.all([api('/api/teacher/assignments'), api('/api/timetable'), api('/api/teacher/summary')]);
-  ctx.setBadge('leave', sum.pending_leaves);
-  const jsDay = new Date().getDay();
-  const todayNo = jsDay === 0 ? 7 : jsDay;
-  const today = tt.filter((t) => t.day === todayNo);
-  const open = assignments.filter((a) => a.open_session_id);
+const nowHHMM = () => new Date().toTimeString().slice(0, 5);
+
+// ---- My lectures: today's classes + weekly allotment ----
+async function lecturesView(main, ctx) {
+  const d = await api('/api/attendance/lectures');
+  const todays = d.lectures.filter((l) => l.day === d.today);
+  const now = nowHHMM();
   const p = ctx.me.profile || {};
 
-  main.append(h('div', { class: 'card profile-card' }, avatar(ctx.me.name, null, 'lg'),
-    h('div', null, h('h2', { text: `Welcome, ${ctx.me.name}` }), h('div', { class: 'meta' },
-      h('span', { text: p.designation || 'Faculty' }), h('span', { text: p.department || '' }), h('span', { text: `Emp no ${p.employee_no || '-'}` })))));
-  if (open.length) {
-    main.append(h('div', { class: 'notice warn' }, `You have ${open.length} attendance not submitted yet. `, h('a', { href: `#attendance/${open[0].open_session_id}`, text: 'Continue' })));
-  }
   main.append(h('div', { class: 'stats' },
-    statCard('students', 'My students', sum.students, `${assignments.length} subject(s)`),
-    statCard('scan', 'Attendance taken', sum.sessions_month, 'last 30 days', 'ok'),
-    statCard('calendar', 'Leave to review', sum.pending_leaves, null, sum.pending_leaves ? 'warn' : ''),
-    statCard('clipboard', 'Submissions to grade', sum.to_grade, null, sum.to_grade ? 'warn' : '')));
+    statCard('calendar', "Today's lectures", todays.length, DAYS[d.today]),
+    statCard('checkbox', 'Attendance done today', todays.filter((l) => l.session_status === 'saved' || l.session_status === 'queued').length, `of ${todays.length}`, 'ok'),
+    statCard('book', 'Lectures per week', d.lectures.length, `${new Set(d.lectures.map((l) => l.class_id)).size} classes`),
+    statCard('teacher', 'Employee ID', p.employee_no || '-', [p.designation, p.department].filter(Boolean).join(' · '))));
 
-  main.append(h('div', { class: 'grid2' },
-    h('div', { class: 'card' }, cardTitle('clock', `Today's classes (${DAYS[todayNo]})`),
-      today.length ? h('div', { class: 'list' }, today.map((t) => h('div', { class: 'list-item' },
-        h('div', { class: 'date-chip' }, h('strong', { text: t.start_time }), h('span', { text: t.end_time })),
-        h('div', { class: 'grow' }, h('div', { class: 'title', text: `${t.subject_code} ${t.subject_name}` }), h('div', { class: 'small muted', text: `${t.class_name}${t.room ? ` · ${t.room}` : ''}` })),
-        h('a', { class: 'btn sm primary', href: '#attendance', text: 'Attendance' }))))
-        : h('div', { class: 'empty', text: 'No classes on your timetable today.' })),
-    h('div', { class: 'card' }, cardTitle('chart', 'Attendance by subject'),
-      bars(sum.subject_attendance.map((s) => ({ label: `${s.code} · ${s.class_name}`, value: s.present || 0, max: s.total || 0, text: s.total ? `${Math.round((s.present / s.total) * 100)}%` : '-' })), { pctKind: true }))));
+  main.append(h('div', { class: 'card' }, cardTitle('clock', `Today, ${DAYS[d.today]} ${fmtDate(d.date)}`),
+    todays.length ? h('div', { class: 'lectures' }, todays.map((l) => lectureCard(l, now, ctx))) : h('div', { class: 'empty', text: 'No lecture is allotted to you today.' })));
 
-  main.append(h('div', { class: 'card' }, cardTitle('book', 'My subjects', h('button', { class: 'primary', onclick: () => ctx.go('attendance') }, icon('scan', 16), 'Take attendance')), table([
-    { label: 'Class', key: 'class_name' }, { label: 'Subject', render: (a) => `${a.subject_code} ${a.subject_name}` },
-    { label: 'Registered', key: 'registered', class: 'num' },
-    { label: 'Face enrolled', class: 'num', render: (a) => h('span', { class: `badge ${a.enrolled < a.registered ? 'warn' : 'ok'}`, text: `${a.enrolled}/${a.registered}` }) },
-    { label: 'Camera', render: (a) => (a.has_camera ? 'IP camera' : 'Laptop / USB') },
-  ], assignments, 'No subjects assigned to you yet.')));
-}
-
-async function students(main) {
-  const classes = await api('/api/teacher/classes');
-  const box = h('div', { class: 'card' });
-  const sel = selectEl(classes.map((c) => ({ value: c.id, label: c.name })), {
-    placeholder: 'Choose a class',
-    onchange: busy(async () => {
-      if (!sel.value) return box.replaceChildren();
-      box.replaceChildren(table([
-        { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' }, { label: 'Phone', key: 'phone' },
-        { label: 'Guardian', render: (s) => [s.guardian_name, s.guardian_phone].filter(Boolean).join(' · ') },
-        { label: 'Face', render: (s) => h('span', { class: `badge ${s.face_samples ? 'ok' : 'warn'}`, text: s.face_samples ? 'Enrolled' : 'Not enrolled' }) },
-      ], await api(`/api/teacher/classes/${sel.value}/students`), 'No students.'));
-    }),
-  });
-  main.append(h('div', { class: 'row' }, h('strong', { text: 'Class' }), sel), h('br'), box);
-}
-
-async function marks(main) {
-  const assignments = await api('/api/teacher/assignments');
-  const editor = h('div', { class: 'card hidden' });
-  const listCard = h('div', { class: 'card' });
-  main.append(h('div', { class: 'card' }, h('h2', { text: 'New exam / test' }), buildForm([
-    { name: 'pair', label: 'Class and subject', type: 'select', required: true, options: assignmentOptions(assignments) },
-    { name: 'name', label: 'Exam name', required: true, placeholder: 'Mid-term 1' },
-    { name: 'max_marks', label: 'Maximum marks', type: 'number', required: true, min: 1 },
-    { name: 'exam_date', label: 'Date', type: 'date' },
-  ], {
-    submitLabel: 'Create',
-    onSubmit: async (d, form) => {
-      const [class_id, subject_id] = d.pair.split(':');
-      const r = await api('/api/teacher/exams', { method: 'POST', body: { class_id, subject_id, name: d.name, max_marks: d.max_marks, exam_date: d.exam_date } });
-      form.reset();
-      toast('Exam created');
-      await load();
-      await openExam(r.id);
-    },
-  })), editor, listCard);
-
-  async function openExam(id) {
-    const d = await api(`/api/teacher/exams/${id}/marks`);
-    const inputs = new Map();
-    editor.replaceChildren(h('div', { class: 'between' }, h('h2', { text: `${d.exam.name} (out of ${d.exam.max_marks})` }),
-      h('button', { class: 'sm', text: 'Close', onclick: () => editor.classList.add('hidden') })),
+  const byDay = [1, 2, 3, 4, 5, 6, 7].map((day) => [day, d.lectures.filter((l) => l.day === day)]).filter(([, list]) => list.length);
+  main.append(h('div', { class: 'card' }, cardTitle('calendar', 'My weekly allotment'),
     table([
-      { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' },
+      { label: 'Day', render: (l) => h('strong', { text: DAYS[l.day] }) },
+      { label: 'Time', render: (l) => `${l.start_time} - ${l.end_time}` },
+      { label: 'Class', key: 'class_name' }, { label: 'Subject', render: (l) => `${l.subject_code} ${l.subject_name}` },
+      { label: 'Room', render: (l) => [l.room_name, l.building].filter(Boolean).join(', ') || '-' },
+      { label: 'Students', class: 'num', key: 'registered' },
+    ], byDay.flatMap(([, list]) => list), 'No lectures allotted yet. Ask the admin.')));
+}
+
+function lectureCard(l, now, ctx) {
+  const isNow = l.start_time <= now && now < l.end_time;
+  const done = l.session_status === 'saved' || l.session_status === 'queued';
+  const open = l.session_status === 'scanning' || l.session_status === 'review';
+  return h('div', { class: `lecture ${isNow ? 'now' : ''} ${done ? 'done' : ''}` },
+    h('div', { class: 'between' }, h('span', { class: 'time', text: `${l.start_time} - ${l.end_time}` }), isNow ? h('span', { class: 'badge red', text: 'Now' }) : statusBadge(l.session_status, l.present_count, l.registered)),
+    h('div', null, h('div', { class: 'subject', text: l.subject_name }), h('div', { class: 'muted small', text: l.subject_code })),
+    h('div', { class: 'meta' },
+      h('span', null, icon('students', 15), l.class_name),
+      h('span', null, icon('pin', 15), l.room_name || 'No room'),
+      h('span', null, icon('users', 15), `${l.registered} registered`),
+      h('span', null, icon('scan', 15), `${l.enrolled} face enrolled`)),
+    l.enrolled < l.registered ? h('div', { class: 'small muted', text: `${l.registered - l.enrolled} students have no face photo; mark them by hand.` }) : null,
+    h('div', { class: 'actions' },
+      h('span', { class: 'small muted', text: l.has_camera ? 'Classroom camera ready' : 'No room camera: use this computer\'s camera' }),
+      done ? h('a', { class: 'btn sm', href: `#attendance/${l.session_id}`, text: 'View' })
+        : h('button', {
+          class: open ? 'primary' : 'red', onclick: busy(async () => {
+            const r = await api('/api/attendance/start', { method: 'POST', body: { lecture_id: l.id } });
+            ctx.go(`attendance/${r.session.id}`);
+          }),
+        }, icon(open ? 'play' : 'scan', 16), open ? 'Continue' : 'Start attendance')));
+}
+
+// ---- Attendance: history list, or one session (#attendance/<id>) ----
+async function attendanceView(main, ctx) {
+  const id = Number(location.hash.split('/')[1]);
+  if (id) return sessionView(main, ctx, id);
+  const list = await api('/api/attendance/history');
+  main.append(h('div', { class: 'card' }, table([
+    { label: 'Date', render: (s) => fmtDate(s.date) }, { label: 'Class', key: 'class_name' }, { label: 'Subject', render: (s) => `${s.subject_code} ${s.subject_name}` },
+    { label: 'Registered', class: 'num', key: 'registered_count' }, { label: 'In class (camera)', class: 'num', key: 'max_faces' },
+    { label: 'Recognised', class: 'num', key: 'recognised_count' }, { label: 'Present', class: 'num', render: (s) => s.present_count ?? '-' },
+    { label: 'Status', render: (s) => statusBadge(s.status, s.present_count, s.registered_count) },
+    { label: '', class: 'actions', render: (s) => h('a', { class: 'btn sm', href: `#attendance/${s.id}`, text: ['scanning', 'review'].includes(s.status) ? 'Continue' : 'View' }) },
+  ], list, 'No attendance taken yet.')));
+}
+
+function ring(secondsLeft, total) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 42 42');
+  const c = (cls) => { const e = document.createElementNS(NS, 'circle'); for (const [k, v] of Object.entries({ cx: 21, cy: 21, r: 15.915, fill: 'none', 'stroke-width': 4, class: cls })) e.setAttribute(k, v); return e; };
+  const track = c('track');
+  const val = c('val');
+  svg.append(track, val);
+  const label = h('div', { class: 'center' });
+  const set = (s) => {
+    const pct = Math.max(0, Math.min(100, (s / total) * 100));
+    val.setAttribute('stroke-dasharray', `${pct} ${100 - pct}`);
+    label.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
+  set(secondsLeft);
+  return { el: h('div', { class: 'ring' }, svg, label), set };
+}
+
+async function sessionView(main, ctx, id) {
+  const state = await api(`/api/attendance/${id}`);
+  const s = state.session;
+  main.querySelector('.page-head h1').textContent = `${s.subject_name} · ${s.class_name}`;
+  main.querySelector('.page-head').append(h('a', { class: 'btn', href: '#lectures' }, 'Back to lectures'));
+  main.append(h('p', { class: 'muted' }, `${fmtDate(s.date)} · ${s.start_time} - ${s.end_time} · Room ${s.room_name || '-'} · ${s.subject_code}`));
+  if (s.status === 'scanning') return scanScreen(main, ctx, state);
+  if (s.status === 'review') return reviewScreen(main, ctx, state);
+  return doneScreen(main, state);
+}
+
+// ---- 1. Live scan: camera frames for N minutes, recognised students appear as they are seen ----
+async function scanScreen(main, ctx, state) {
+  const { cameraPanel, detectFaces, drawOverlay } = await import('./camera.js');
+  const s = state.session;
+  const total = ctx.me.scan_minutes * 60;
+  const interval = Math.max(1, ctx.me.frame_interval_seconds) * 1000;
+  const panel = cameraPanel({ roomSnapshotUrl: s.has_camera ? `/api/attendance/${s.id}/camera` : null, allowUpload: true });
+  const timer = ring(s.seconds_left, total);
+  const counts = { reg: h('strong', { text: state.counts.registered }), now: h('strong', { text: 0 }), rec: h('strong', { text: state.counts.recognised }) };
+  const list = h('div', { class: 'recog-list' });
+  const recTitle = h('h2', { text: `Recognised (${state.scan.recognised.length})` });
+  const log = h('div', { class: 'small muted' });
+  let stopped = false;
+
+  const addRow = (r, fresh) => list.prepend(h('div', { class: `recog ${fresh ? 'fresh' : ''}` }, h('span', { class: 'avatar', text: initials(r.name) }),
+    h('div', { class: 'grow' }, h('div', { text: r.name }), h('div', { class: 'small muted', text: r.roll_no })),
+    h('span', { class: 'badge ok', text: `${Math.round(r.confidence * 100)}%` })));
+  state.scan.recognised.forEach((r) => addRow(r, false));
+  if (!state.scan.recognised.length) list.append(h('div', { class: 'empty', text: 'Recognised students will appear here.' }));
+
+  if (state.counts.enrolled === 0) main.append(h('div', { class: 'notice warn', text: 'No student of this class has a face photo yet, so the camera cannot recognise anyone. You can still mark everyone by hand after the scan.' }));
+  main.append(h('div', { class: 'scan-layout' },
+    h('div', { class: 'card' }, cardTitle('camera', 'Classroom camera'), panel.el),
+    h('div', null,
+      h('div', { class: 'card' }, h('div', { class: 'countdown' }, timer.el, h('div', { class: 'big-counts' },
+        h('div', null, counts.reg, h('span', { text: 'Registered' })), h('div', null, counts.now, h('span', { text: 'In class (camera)' })), h('div', null, counts.rec, h('span', { text: 'Recognised' })))),
+      h('br'), log,
+      h('div', { class: 'row end' }, h('button', { class: 'danger sm', text: 'Cancel', onclick: busy(cancel) }), h('button', { class: 'primary', onclick: busy(() => finish(true)) }, icon('stop', 16), 'Stop scan and review'))),
+      h('div', { class: 'card' }, recTitle, list))));
+
+  async function cancel() {
+    if (!await confirmBox('Cancel this attendance? Nothing will be saved.', { ok: 'Cancel attendance', danger: true })) return;
+    stopped = true;
+    panel.stop();
+    await api(`/api/attendance/${s.id}/cancel`, { method: 'POST' });
+    ctx.go('lectures');
+  }
+
+  async function finish(early) {
+    if (stopped) return;
+    if (early && !await confirmBox('Stop scanning now and go to the review list?', { ok: 'Stop scan' })) return;
+    stopped = true;
+    panel.stop();
+    await api(`/api/attendance/${s.id}/finish`, { method: 'POST' });
+    toast('Scan complete. Check the list and submit.', 'ok');
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  }
+
+  ctx.cleanup = () => { stopped = true; panel.stop(); };
+  panel.setLive(true);
+  let secondsLeft = s.seconds_left;
+  const tick = setInterval(() => { secondsLeft = Math.max(0, secondsLeft - 1); timer.set(secondsLeft); if (!secondsLeft) { clearInterval(tick); finish(false).catch(() => {}); } if (stopped) clearInterval(tick); }, 1000);
+
+  // Capture loop: grab, detect locally, send descriptors, show results; then wait.
+  (async function loop() {
+    while (!stopped && secondsLeft > 0) {
+      const t0 = Date.now();
+      try {
+        const frame = await panel.grab();
+        const faces = await detectFaces(frame, ctx.me.min_face_confidence);
+        if (stopped) break;
+        const r = await api(`/api/attendance/${s.id}/frame`, { method: 'POST', body: { faces: faces.map((f) => f.descriptor) } });
+        const byFace = new Map(r.matches.map((m) => [m.faceIndex, m.roll_no]));
+        drawOverlay(panel.overlay, frame.width, frame.height, faces, faces.map((_, i) => byFace.get(i)));
+        counts.now.textContent = r.faces;
+        counts.rec.textContent = r.recognised;
+        recTitle.textContent = `Recognised (${r.recognised})`;
+        if (r.fresh.length && list.querySelector('.empty')) list.replaceChildren();
+        r.fresh.forEach((x) => addRow(x, true));
+        secondsLeft = r.seconds_left;
+        log.textContent = `Frame ${r.frames}: ${r.faces} face(s) in view, highest so far ${r.max_faces}.`;
+        panel.setStatus('');
+      } catch (err) {
+        if (err.status === 409) { await finish(false).catch(() => {}); break; }
+        panel.setStatus(err.message);
+      }
+      await new Promise((res) => setTimeout(res, Math.max(200, interval - (Date.now() - t0))));
+    }
+  })();
+}
+
+// ---- 2. Review: everyone in the class, camera result pre-filled, teacher corrects, submits ----
+function reviewScreen(main, ctx, state) {
+  const s = state.session;
+  const camera = new Map(state.scan.recognised.map((r) => [Number(r.student_id), r]));
+  const marks = new Map(state.roster.map((st) => [st.id, camera.has(st.id) ? 'P' : 'A']));
+  const headcount = state.scan.maxFaces || 0;
+  const statsBox = h('div', { class: 'stats' });
+  const warnBox = h('div');
+  const listBox = h('div');
+  const summary = h('span', { class: 'grow' });
+  const search = h('input', { type: 'search', placeholder: 'Search name or roll no', 'aria-label': 'Search students' });
+  const onlyMissing = h('input', { type: 'checkbox', id: 'only-missing' });
+  search.addEventListener('input', () => renderList());
+  onlyMissing.addEventListener('change', () => renderList());
+
+  main.append(statsBox, warnBox, h('div', { class: 'card' },
+    cardTitle('usercheck', 'Mark attendance', h('label', { class: 'row small', for: 'only-missing' }, onlyMissing, 'Show only not recognised'), search,
+      h('button', { class: 'sm ok', text: 'Mark all present', onclick: () => { for (const k of marks.keys()) marks.set(k, 'P'); render(); } })),
+    h('p', { class: 'muted small', text: 'Students recognised by the camera are already marked present. Mark anyone the camera missed by hand.' }),
+    listBox),
+  h('div', { class: 'sticky-bar' }, summary,
+    h('button', { class: 'danger', text: 'Cancel attendance', onclick: busy(async () => {
+      if (!await confirmBox('Cancel this attendance? Nothing will be saved.', { ok: 'Cancel attendance', danger: true })) return;
+      await api(`/api/attendance/${s.id}/cancel`, { method: 'POST' });
+      ctx.go('lectures');
+    }) }),
+    h('button', { class: 'red big', onclick: busy(submit) }, icon('check', 18), 'Submit attendance')));
+
+  function counts() {
+    const present = [...marks.values()].filter((m) => m === 'P').length;
+    return { present, absent: marks.size - present, manualPresent: [...marks].filter(([k, m]) => m === 'P' && !camera.has(k)).length };
+  }
+
+  function render() {
+    const c = counts();
+    statsBox.replaceChildren(
+      statCard('users', 'Registered in class', state.counts.registered, 'official strength'),
+      statCard('scan', 'In class (camera count)', headcount, `${state.scan.frames} frames scanned`, 'red'),
+      statCard('usercheck', 'Recognised by camera', camera.size, null, 'ok'),
+      statCard('checkbox', 'Present (final)', c.present, c.manualPresent ? `${c.manualPresent} marked by hand` : null, 'ok'),
+      statCard('x', 'Absent', c.absent, null, 'warn'));
+    const notes = [];
+    if (headcount > camera.size) notes.push(['warn', `The camera counted ${headcount} people but recognised only ${camera.size}. ${headcount - camera.size} could not be matched; check the list and mark them by hand.`]);
+    if (c.present > headcount && headcount > 0) notes.push(['bad', `${c.present} students are marked present but the camera counted at most ${headcount} people in the room. Please double-check (possible proxy).`]);
+    warnBox.replaceChildren(...notes.map(([k, t]) => h('div', { class: `notice ${k}`, text: t })));
+    summary.textContent = `${c.present} present · ${c.absent} absent · ${state.counts.registered} registered`;
+    renderList();
+  }
+
+  function renderList() {
+    const q = search.value.trim().toLowerCase();
+    const rows = state.roster.filter((st) => (!q || st.name.toLowerCase().includes(q) || st.roll_no.toLowerCase().includes(q)) && (!onlyMissing.checked || !camera.has(st.id)));
+    listBox.replaceChildren(table([
+      { label: 'Roll no', key: 'roll_no' },
+      { label: 'Name', key: 'name' },
+      { label: 'Camera', render: (st) => (camera.has(st.id) ? h('span', { class: 'badge ok', text: `Recognised ${Math.round(camera.get(st.id).confidence * 100)}%` }) : st.enrolled ? h('span', { class: 'badge', text: 'Not seen' }) : h('span', { class: 'badge warn', text: 'No face photo' })) },
       {
-        label: 'Marks', render: (s) => {
-          const inp = h('input', { class: 'marks', type: 'number', min: 0, max: d.exam.max_marks, step: '0.5', value: s.marks ?? '', 'aria-label': `Marks for ${s.name}` });
-          inputs.set(s.id, inp);
-          return inp;
+        label: 'Attendance', class: 'actions', render: (st) => {
+          const m = marks.get(st.id);
+          return h('div', { class: 'seg', role: 'group', 'aria-label': `Attendance for ${st.name}` },
+            h('button', { class: m === 'P' ? 'on-p' : '', text: 'Present', 'aria-pressed': String(m === 'P'), onclick: () => { marks.set(st.id, 'P'); render(); } }),
+            h('button', { class: m === 'A' ? 'on-a' : '', text: 'Absent', 'aria-pressed': String(m === 'A'), onclick: () => { marks.set(st.id, 'A'); render(); } }));
         },
       },
-    ], d.students, 'No students.'),
-    h('div', { class: 'form-actions' }, h('button', {
-      class: 'primary', text: 'Save marks', onclick: busy(async () => {
-        const list = [...inputs].map(([student_id, inp]) => ({ student_id, marks: inp.value === '' ? null : inp.value }));
-        await api(`/api/teacher/exams/${id}/marks`, { method: 'PUT', body: { marks: list } });
-        toast('Marks saved');
-        await load();
-      }),
-    })));
-    editor.classList.remove('hidden');
-    editor.scrollIntoView({ behavior: 'smooth' });
+    ], rows, 'No student matches.'));
   }
 
-  async function load() {
-    listCard.replaceChildren(h('h2', { text: 'Exams' }), table([
-      { label: 'Date', render: (e) => fmtDate(e.exam_date) }, { label: 'Exam', key: 'name' }, { label: 'Class', key: 'class_name' },
-      { label: 'Subject', key: 'subject_code' }, { label: 'Max', key: 'max_marks', class: 'num' }, { label: 'Entered', key: 'marked', class: 'num' },
-      {
-        label: '', class: 'actions', render: (e) => h('span', { class: 'row end' },
-          h('button', { class: 'sm primary', text: 'Enter marks', onclick: busy(() => openExam(e.id)) }),
-          h('button', {
-            class: 'sm danger', text: 'Delete', onclick: busy(async () => {
-              if (!await confirmBox(`Delete ${e.name} and all its marks?`, { ok: 'Delete', danger: true })) return;
-              await api(`/api/teacher/exams/${e.id}`, { method: 'DELETE' });
-              await load();
-            }),
-          })),
-      },
-    ], await api('/api/teacher/exams'), 'No exams yet.'));
+  async function submit() {
+    const c = counts();
+    const msg = `Registered: ${state.counts.registered}\nIn class (camera count): ${headcount}\nRecognised by camera: ${camera.size}\nPresent: ${c.present}${c.manualPresent ? ` (${c.manualPresent} by hand)` : ''}\nAbsent: ${c.absent}\n\nAfter submitting, only the admin can change it.`;
+    if (!await confirmBox(msg, { ok: 'Submit attendance', title: 'Submit attendance?' })) return;
+    // Only send marks that differ from what the camera decided.
+    const manual = {};
+    for (const [k, m] of marks) if (m !== (camera.has(k) ? 'P' : 'A')) manual[k] = m;
+    const r = await api(`/api/attendance/${s.id}/submit`, { method: 'POST', body: { manual } });
+    if (r.mode === 'direct') toast(`Attendance saved: ${r.present} of ${r.total} present`, 'ok');
+    else toast(`Attendance received (${r.present} of ${r.total} present). It is queued and will be saved shortly; you will get a notification.`, 'ok');
+    ctx.refreshNotifications(true);
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
   }
-  await load();
+
+  render();
 }
 
-async function reports(main) {
-  const assignments = await api('/api/teacher/assignments');
-  const box = h('div', { class: 'card' });
-  const sel = selectEl(assignmentOptions(assignments), {
-    placeholder: 'Choose class and subject',
-    onchange: busy(async () => {
-      if (!sel.value) return box.replaceChildren();
-      const [classId, subjectId] = sel.value.split(':');
-      const q = `classId=${classId}&subjectId=${subjectId}`;
-      const r = await api(`/api/teacher/reports/attendance?${q}`);
-      box.replaceChildren(h('div', { class: 'between' }, h('h2', { text: 'Attendance' }), h('a', { class: 'btn', href: `/api/teacher/reports/attendance?${q}&format=csv`, text: 'Download CSV' })),
-        table([
-          { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' },
-          { label: 'Present', class: 'num', render: (s) => `${s.present} / ${s.total}` }, { label: '%', render: (s) => pctBadge(s.pct) },
-        ], r.students, 'No students.'));
-    }),
-  });
-  main.append(h('div', { class: 'row' }, sel), h('br'), box);
+// ---- 3. Submitted ----
+function doneScreen(main, state) {
+  const s = state.session;
+  const recs = new Map((state.records || []).map((r) => [r.student_id, r]));
+  if (s.status === 'queued') main.append(h('div', { class: 'notice info', text: 'Submitted. Many classes are submitting right now, so this attendance is in the save queue. You will get a notification as soon as it is saved (well before the next lecture).' }));
+  if (s.status === 'cancelled') main.append(h('div', { class: 'notice warn', text: 'This attendance was cancelled.' }));
+  main.append(h('div', { class: 'stats' },
+    statCard('users', 'Registered', s.registered_count),
+    statCard('scan', 'In class (camera count)', s.max_faces, null, 'red'),
+    statCard('usercheck', 'Recognised by camera', s.recognised_count, null, 'ok'),
+    statCard('checkbox', 'Present', s.present_count ?? '-', s.saved_at ? `saved ${fmtTime(s.saved_at)}` : 'saving...', 'ok')));
+  if (state.records) {
+    main.append(h('div', { class: 'card' }, table([
+      { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' },
+      { label: 'Status', render: (st) => { const r = recs.get(st.id); return r ? h('span', { class: `badge ${r.status === 'P' ? 'ok' : 'bad'}`, text: r.status === 'P' ? 'Present' : 'Absent' }) : '-'; } },
+      { label: 'Marked by', render: (st) => ({ camera: 'Camera', manual: 'Teacher', auto: 'Not seen' }[recs.get(st.id)?.source] || '-') },
+    ], state.roster)));
+  }
 }
 
-async function timetable(main) {
-  main.append(h('div', { class: 'card' }, timetableView(await api('/api/timetable'), { showClass: true })));
-}
-
-const myPairs = async () => assignmentOptions(await api('/api/teacher/assignments'));
-
-startApp('teacher', [
-  { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', group: 'Overview', render: dashboard },
-  { id: 'attendance', label: 'Take attendance', icon: 'scan', group: 'Attendance', render: attendanceView },
-  { id: 'faces', label: 'Face enrolment', icon: 'camera', group: 'Attendance', render: enrollView('/api/teacher/classes') },
-  { id: 'reports', label: 'Attendance report', icon: 'chart', group: 'Attendance', render: reports },
-  { id: 'leave', label: 'Leave requests', icon: 'calendar', group: 'Attendance', render: leaveReview },
-  { id: 'students', label: 'My students', icon: 'students', group: 'Academics', render: students },
-  { id: 'homework', label: 'Assignments', icon: 'clipboard', group: 'Academics', render: homeworkTeacher },
-  { id: 'marks', label: 'Class tests', icon: 'file', group: 'Academics', render: marks },
-  { id: 'results', label: 'Internal marks', icon: 'award', group: 'Academics', render: async (main) => resultsSheet(main, await myPairs()) },
-  { id: 'timetable', label: 'Timetable', icon: 'clock', group: 'Academics', render: timetable },
-  { id: 'feedback', label: 'My feedback', icon: 'star', group: 'Communication', render: feedbackSummary },
-  { id: 'notices', label: 'Notices', icon: 'bell', group: 'Communication', render: noticesView },
-  { id: 'grievance', label: 'Grievance', icon: 'alert', group: 'Communication', render: myGrievances },
-]).then((ctx) => {
-  api('/api/teacher/summary').then((s) => ctx.setBadge('leave', s.pending_leaves)).catch(() => {});
-});
+startApp(['teacher'], [
+  { id: 'lectures', label: 'My lectures', icon: 'calendar', group: 'Teaching', render: lecturesView },
+  { id: 'attendance', label: 'Attendance', icon: 'checkbox', group: 'Teaching', render: attendanceView },
+]);

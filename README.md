@@ -1,77 +1,80 @@
-# UU College ERP — camera attendance
+# United University, Prayagraj — ERP with camera attendance
 
-A standard college ERP (students, teachers, classes, subjects, timetable, exams and marks, fees, notices, reports) where **attendance is taken by the classroom camera with face recognition** instead of a paper register.
+Attendance is taken by the classroom camera with face recognition. The teacher starts it, the camera recognises students for 5 minutes, and the teacher checks the list, marks anyone the camera missed, and submits.
 
-## How camera attendance works
+## Who logs in
 
-1. **Face enrolment (once).** Admin or teacher opens *Face enrolment*, picks the class and captures a photo with the classroom camera (a group photo works). Every detected face appears with a name dropdown; choose the student and save. 2–3 photos per student give the best results. If a face looks like a student who is already enrolled, the system warns before saving.
-2. **Teacher starts attendance.** Nothing happens until the teacher presses **Start attendance** for their class + subject. Only the teacher assigned to that class and subject can do this.
-3. **Capture.** The camera takes a photo of the class. Faces are detected in the browser, and the server matches them against the enrolled photos. The teacher can capture again from another angle; students already recognised stay present.
-4. **Check the numbers before saving.** The screen shows:
-   - **Registered in class**: official strength
-   - **Counted by camera**: how many people the camera saw
-   - **Recognised by camera**, **Present**, **Absent**, **Not marked**
+| Login tab | Can do |
+| --- | --- |
+| **Teacher** (employee ID or username) | See the lectures allotted to them (today + weekly), start attendance, live 5-minute camera scan, review list with manual marking, submit, history, notifications |
+| **Admin** | Students (one by one or CSV import of thousands), faculty, classes, subjects, rooms and their cameras, lecture allotment (timetable, with clash checks), face enrolment (bulk photos named by roll number, or camera), attendance records and corrections, reports (CSV) |
+| **Super admin** | Everything an admin can, plus admin accounts, university settings (scan length, face-match strictness, queue limits), live system monitor, audit log |
 
-   It warns when faces were not recognised, when students have no face photo, and when more students are marked present than the camera counted (a sign of proxy attendance).
-5. **Manual marking at any time.** The teacher can mark any student Present or Absent by hand. A manual mark always wins over the camera.
-6. **Submit.** Attendance counts only after the teacher submits. Unmarked students are saved as absent. After that the record is locked; only the admin can correct it, and every correction is written to the audit log.
+## Attendance flow
 
-## Roles and modules
+1. The teacher opens **My lectures** and sees where and when they teach today.
+2. **Start attendance** on a lecture. Only the allotted teacher can, once per lecture per day.
+3. For 5 minutes (setting), the classroom camera is read every 3 seconds. The browser finds faces and sends only the face numbers (128-number descriptors) to the server, which matches them against that class. Recognised students appear live with their roll number.
+4. After 5 minutes the teacher sees:
+   - **Registered in class** (official strength)
+   - **In class** (the highest number of people the camera saw at once)
+   - **Recognised by camera**
+   - **Present / Absent**
 
-- **Admin**: dashboard with charts (daily attendance, class-wise attendance, fee collection), departments, classes (with the classroom camera URL), subjects, faculty, students (one by one or a pasted list), subject allotment, timetable, attendance reports (CSV) and corrections, leave requests, **results** (internal + external marks, publish, grade cards with SGPA/CGPA), fee heads and fee collection with receipts, **library** (catalogue, issue/return, late fine), **hostel** (hostels, rooms, allotment), **transport** (bus routes, bus passes), printable **student ID cards**, notices, **grievances**, **faculty feedback** report, settings, audit log.
-- **Teacher**: dashboard (today's classes, attendance by subject), take attendance, face enrolment, attendance report, leave approvals, **assignments** (post, view submissions, grade), class tests, **internal marks**, timetable, own feedback (anonymous), notices, grievance.
-- **Student**: dashboard (photo, attendance chart, CGPA, fees, pending assignments, today's classes, notices), attendance (warning below 75%), timetable, assignments (submit text or a file up to 2 MB), class tests, **results / grade card** (printable), fees and receipts, **leave** application, library, hostel and bus details, **ID card** (printable), faculty feedback, grievance, profile.
+   Warnings appear when people were seen but not recognised, or when more students are marked present than the camera counted (possible proxy).
+5. The teacher marks anyone missed by hand (a manual mark always wins over the camera) and presses **Submit**.
+6. The teacher gets a notification: "Attendance saved: 52 of 60 present".
 
-Results use a 10-point scale: internal 40 + external 60; O 90+, A+ 80+, A 70+, B+ 60+, B 50+, C 45+, P 40+, F below 40. SGPA and CGPA are credit-weighted; % = CGPA x 9.5. Students can log in with their roll number.
+## Built for 4,000–5,000 users
 
-## Run it
+- **During the scan** the recognitions stay in server memory, so a class does not write to the database every few seconds. It is checkpointed every 10 frames, so a server restart does not lose it.
+- **On submit**, one transaction with one bulk insert saves the whole class.
+- **Peak-load queue.** When more than 500 submissions (setting) arrive within a minute, new ones go into a durable queue (a PostgreSQL table, safe across restarts and across several servers) and the teacher gets an answer immediately. The queue is saved when traffic drops, in the gap between lectures. Anything older than 45 minutes (setting) is saved even during peak, so nothing waits past the next lecture. The teacher is notified when theirs is saved.
+- Face galleries per class and logged-in users are cached in memory. Sessions are signed cookies (no database lookup per request). Password hashing runs off the main thread.
 
-Needs Node.js 22.13 or newer.
+Load test (`npm run loadtest`) on a laptop with the embedded database:
+- 1,000 classes × 60 students submitted at the same moment
+- every submission was answered within 4.2 s (250 saved at once, 750 queued)
+- the queue was saved in 8 s
+- 60,000 rows were saved with nothing lost
+- face matching takes 7.6 ms for a 60-face frame, so one CPU core handles about 390 classes scanning at once
+
+## Run
+
+Needs Node.js 20+.
 
 ```bash
 npm install
 npm start
 ```
 
-Open http://localhost:3000. On the first start an `admin` account is created and its one-time password is saved in `data/initial-admin.txt`. It has to be changed at the first login.
+Open http://localhost:3000. With no `DATABASE_URL`, an embedded PostgreSQL (PGlite) is kept in `data/`. The first start creates the `superadmin` account; its one-time password is in `data/initial-super-admin.txt`.
 
-To load demo data (2 classes, 3 subjects, 2 teachers, 24 students, 3 weeks of past attendance):
+Demo data (3 classes, 120 students, 3 teachers, timetable, two weeks of attendance):
 
 ```bash
 npm run seed:demo
 ```
 
-The demo logins are saved in `data/demo-logins.txt`.
+Logins are in `data/demo-logins.txt`.
 
-## Put it online (Render, free demo)
+### Production (university server)
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Ashutosh26-uu/UUattendence-erp)
+| Variable | Meaning |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string (recommended for production; PostgreSQL 14+) |
+| `DB_POOL_SIZE` | Connections per app server (default 20) |
+| `SESSION_SECRET` | Long random string; must be the same on every app server |
+| `SUPER_ADMIN_PASSWORD` | Password for the first super admin (otherwise written to a file) |
+| `TRUST_PROXY=1` | When running behind nginx / a load balancer with HTTPS |
+| `TZ` | Defaults to `Asia/Kolkata` |
+| `PORT`, `HOST` | Default 3000, 0.0.0.0 |
 
-Click the button, sign in to Render with GitHub and press **Apply**. `render.yaml` sets everything up, and every push to `main` redeploys.
+- Run it behind HTTPS (nginx or Caddy). Browsers only allow the computer's camera on https.
+- For more capacity, run several app servers behind a load balancer with **sticky sessions**, since live scans are held in the server's memory. All of them share one PostgreSQL.
+- **Classroom IP cameras:** in *Rooms and cameras*, set each camera's JPEG snapshot URL (for example `http://user:pass@10.0.5.21/cgi-bin/snapshot.cgi`). The ERP server must be on the campus network to reach them, and only Basic auth is supported.
+- Back up the database daily. It holds face data, so restrict access.
 
-- Passwords: Render dashboard -> the service -> **Environment**. `ADMIN_PASSWORD` is for the `admin` login. `DEMO_PASSWORD` is for `teacher1`, `teacher2` and the students `bca3a01`..`bca3b12`.
-- The free plan **wipes all data on every restart or deploy**, and the server sleeps after 15 minutes without visits (the first visit after that takes about a minute). On every start the admin account and demo data are created again. For real use, move to a paid plan with a persistent disk mounted at `/opt/render/project/src/data`, and remove `SEED_DEMO`.
-- A cloud server cannot reach a classroom IP camera on the campus LAN. Online, use "This computer's camera" (works because Render gives https) or "Upload a photo".
+## Logo
 
-## Cameras
-
-- **Classroom IP camera**: in *Classes*, set the camera's JPEG snapshot URL, for example `http://user:pass@192.168.1.50/cgi-bin/snapshot.cgi`. The server fetches the picture, so the camera password never reaches the browser. Only Basic auth is supported.
-- **Laptop or USB camera**: pick "This computer's camera". Browsers only allow camera access over **https** or on `localhost`, so on the campus network run the ERP behind HTTPS (for example nginx or Caddy with a certificate) and set `TRUST_PROXY=1`.
-- **Upload a photo**: a fallback if no camera is available.
-
-Tips: use a camera with at least 1080p that sees every row from the front, with good light. If back-row faces are missed, lower *Face detection confidence* in Settings. If look-alikes get mixed up, lower *Face match strictness* (for example 0.45).
-
-## Settings (environment)
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `PORT` | 3000 | Port to listen on |
-| `HOST` | 0.0.0.0 | Address to listen on |
-| `DATA_DIR` | `./data` | Where the SQLite database is kept |
-| `TRUST_PROXY` | (off) | Set to `1` when running behind an HTTPS reverse proxy |
-
-## Tech
-
-Node.js + Express 5, SQLite (`node:sqlite`), plain HTML/CSS/JS, and [face-api.js](https://github.com/vladmandic/face-api) (TensorFlow.js) for detection in the browser. Matching runs on the server against 128-number face descriptors, so a teacher's browser never receives other students' face data. Passwords use scrypt; sessions use HttpOnly SameSite cookies; a strict Content-Security-Policy is set on every page.
-
-Back up the `data/` folder regularly. It holds the database, including face data.
+The logo is the university's own logo (`assets/logo-original.png`). `python scripts/prepare-logo.py` trims it into `public/img/logo.png` (on white), `logo-transparent.png`, `logo-mark.png` (the emblem) and `favicon.png`. To change the logo, replace `assets/logo-original.png` and run the script again.

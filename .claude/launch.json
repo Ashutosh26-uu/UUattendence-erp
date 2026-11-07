@@ -2,9 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "college-erp",
+      "name": "start",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["start"],
+      "runtimeArgs": [
+        "run",
+        "start"
+      ],
       "port": 3000
     }
   ]

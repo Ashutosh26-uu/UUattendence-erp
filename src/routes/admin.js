@@ -1,14 +1,13 @@
+// University administration (admin and super admin).
 const express = require('express');
-const { one, all, run, tx, audit, getSettings } = require('../db');
-const { HttpError, str, int, num, date, time, oneOf, today, csv } = require('../http');
-const { requireRole, hashPassword, tempPassword, checkNewPassword } = require('../auth');
+const { query, one, tx, audit } = require('../db');
+const { HttpError, str, int, date, time, oneOf, today, sendCsv } = require('../http');
+const auth = require('../auth');
 const { crud } = require('../crud');
-const { getClass } = require('../access');
-const { classAttendanceReport } = require('../reports');
+const { parseDescriptor, toBytes, fromBytes, distance, forgetGallery } = require('../face');
 
 const router = express.Router();
-router.use(requireRole('admin'));
-
+router.use(auth.requireRole('admin'));
 const req_ = { required: true };
 
 function cameraUrl(v) {
@@ -20,383 +19,384 @@ function cameraUrl(v) {
   return s;
 }
 
-router.get('/stats', (req, res) => {
-  const count = (sql, ...p) => one(sql, ...p).n;
-  res.json({
-    students: count("SELECT COUNT(*) AS n FROM students s JOIN users u ON u.id = s.user_id WHERE u.active = 1"),
-    teachers: count("SELECT COUNT(*) AS n FROM teachers t JOIN users u ON u.id = t.user_id WHERE u.active = 1"),
-    classes: count('SELECT COUNT(*) AS n FROM classes'),
-    subjects: count('SELECT COUNT(*) AS n FROM subjects'),
-    face_enrolled: count('SELECT COUNT(DISTINCT student_id) AS n FROM face_samples'),
-    sessions_today: count("SELECT COUNT(*) AS n FROM attendance_sessions WHERE date = ? AND status = 'submitted'", today()),
-    sessions_open: count("SELECT COUNT(*) AS n FROM attendance_sessions WHERE status = 'open'"),
-    fees_collected: one('SELECT COALESCE(SUM(amount), 0) AS n FROM fee_payments').n,
-    fees_total: one(`SELECT COALESCE(SUM(f.amount), 0) AS n FROM fee_structures f
-      JOIN students s ON s.class_id = f.class_id JOIN users u ON u.id = s.user_id WHERE u.active = 1`).n,
-    pending_leaves: count("SELECT COUNT(*) AS n FROM leave_requests WHERE status = 'pending'"),
-    open_grievances: count("SELECT COUNT(*) AS n FROM grievances WHERE status <> 'resolved'"),
-    books_issued: count('SELECT COUNT(*) AS n FROM book_issues WHERE returned_on IS NULL'),
-    hostel_residents: count('SELECT COUNT(*) AS n FROM hostel_allotments'),
-    bus_riders: count('SELECT COUNT(*) AS n FROM transport_allotments'),
-    // Daily attendance % over the last 14 days with classes.
-    attendance_trend: all(`SELECT a.date, SUM(m.status = 'present') AS present, COUNT(*) AS total FROM attendance_sessions a
-      JOIN attendance_marks m ON m.session_id = a.id WHERE a.status = 'submitted' GROUP BY a.date ORDER BY a.date DESC LIMIT 14`).reverse(),
-    class_attendance: all(`SELECT c.name, SUM(m.status = 'present') AS present, COUNT(m.student_id) AS total FROM classes c
-      LEFT JOIN attendance_sessions a ON a.class_id = c.id AND a.status = 'submitted' LEFT JOIN attendance_marks m ON m.session_id = a.id
-      GROUP BY c.id ORDER BY c.name`),
-  });
-});
-
-// Data for printable student ID cards (photo = first enrolled face photo).
-router.get('/id-cards', (req, res) => {
-  const classId = int(req.query.classId, 'Class', req_);
-  res.json(all(`SELECT u.id, u.name, u.phone, s.roll_no, s.dob, s.blood_group, s.guardian_name, s.guardian_phone, s.address, s.admission_year,
-    c.name AS class_name, d.name AS department,
-    (SELECT f.photo FROM face_samples f WHERE f.student_id = u.id ORDER BY f.id LIMIT 1) AS photo
-    FROM students s JOIN users u ON u.id = s.user_id JOIN classes c ON c.id = s.class_id JOIN departments d ON d.id = c.department_id
-    WHERE s.class_id = ? AND u.active = 1 ORDER BY s.roll_no`, classId));
+router.get('/stats', async (req, res) => {
+  const day = today();
+  const [counts, todayRow, trend, classAttendance] = await Promise.all([
+    one(`SELECT (SELECT count(*) FROM students WHERE active)::int AS students,
+      (SELECT count(*) FROM users WHERE role = 'teacher' AND active)::int AS teachers,
+      (SELECT count(*) FROM classes)::int AS classes, (SELECT count(*) FROM rooms)::int AS rooms,
+      (SELECT count(*) FROM rooms WHERE camera_url IS NOT NULL)::int AS cameras,
+      (SELECT count(DISTINCT student_id) FROM face_samples)::int AS enrolled,
+      (SELECT count(*) FROM lectures)::int AS lectures`),
+    one(`SELECT count(*) FILTER (WHERE status = 'saved')::int AS saved, count(*) FILTER (WHERE status = 'queued')::int AS queued,
+      count(*) FILTER (WHERE status IN ('scanning','review'))::int AS live,
+      COALESCE(sum(present_count) FILTER (WHERE status = 'saved'), 0)::int AS present,
+      COALESCE(sum(registered_count) FILTER (WHERE status = 'saved'), 0)::int AS registered
+      FROM attendance_sessions WHERE date = $1`, [day]),
+    query(`SELECT date::text AS date, sum(present_count)::int AS present, sum(registered_count)::int AS registered
+      FROM attendance_sessions WHERE status = 'saved' AND date > $1::date - 30 GROUP BY date ORDER BY date DESC LIMIT 14`, [day]),
+    query(`SELECT c.name, COALESCE(sum(a.present_count), 0)::int AS present, COALESCE(sum(a.registered_count), 0)::int AS registered
+      FROM classes c LEFT JOIN attendance_sessions a ON a.class_id = c.id AND a.status = 'saved' GROUP BY c.id ORDER BY c.name`),
+  ]);
+  res.json({ ...counts, today: todayRow, trend: trend.reverse(), class_attendance: classAttendance });
 });
 
 // ---- Master data ----
 crud(router, {
   path: '/departments', table: 'departments', label: 'Department',
-  fields: { code: (v) => str(v, 'Code', { required: true, max: 20 }), name: (v) => str(v, 'Name', { required: true }) },
+  fields: { code: (v) => str(v, 'Code', { required: true, max: 20 }), name: (v) => str(v, 'Name', req_) },
   listSql: 'SELECT * FROM departments ORDER BY code',
 });
 
 crud(router, {
   path: '/classes', table: 'classes', label: 'Class',
   fields: {
-    name: (v) => str(v, 'Name', req_),
+    name: (v) => str(v, 'Class name', req_),
     department_id: (v) => int(v, 'Department', req_),
+    program: (v) => str(v, 'Program', { max: 60 }),
     semester: (v) => int(v, 'Semester', { min: 1, max: 12 }),
     section: (v) => str(v, 'Section', { max: 10 }),
     academic_year: (v) => str(v, 'Academic year', { max: 20 }),
-    room: (v) => str(v, 'Room', { max: 50 }),
-    camera_url: cameraUrl,
   },
-  listSql: `SELECT c.*, d.name AS department_name,
-    (SELECT COUNT(*) FROM students s JOIN users u ON u.id = s.user_id WHERE s.class_id = c.id AND u.active = 1) AS student_count
+  listSql: `SELECT c.*, d.name AS department_name, (SELECT count(*) FROM students s WHERE s.class_id = c.id AND s.active)::int AS students,
+    (SELECT count(DISTINCT f.student_id) FROM face_samples f JOIN students s ON s.id = f.student_id WHERE s.class_id = c.id AND s.active)::int AS enrolled
     FROM classes c JOIN departments d ON d.id = c.department_id ORDER BY c.name`,
 });
 
 crud(router, {
-  path: '/subjects', table: 'subjects', label: 'Subject',
+  path: '/rooms', table: 'rooms', label: 'Room',
   fields: {
-    code: (v) => str(v, 'Code', { required: true, max: 20 }),
-    name: (v) => str(v, 'Name', req_),
-    department_id: (v) => int(v, 'Department'),
-    credits: (v) => int(v, 'Credits', { min: 0, max: 20 }),
+    name: (v) => str(v, 'Room', req_),
+    building: (v) => str(v, 'Building'),
+    capacity: (v) => int(v, 'Capacity', { min: 1, max: 2000 }),
+    camera_url: cameraUrl,
   },
+  listSql: 'SELECT * FROM rooms ORDER BY building, name',
+});
+
+crud(router, {
+  path: '/subjects', table: 'subjects', label: 'Subject',
+  fields: { code: (v) => str(v, 'Code', { required: true, max: 20 }), name: (v) => str(v, 'Name', req_), department_id: (v) => int(v, 'Department') },
   listSql: 'SELECT s.*, d.name AS department_name FROM subjects s LEFT JOIN departments d ON d.id = s.department_id ORDER BY s.code',
 });
 
-crud(router, {
-  path: '/notices', table: 'notices', label: 'Notice',
-  fields: {
-    title: (v) => str(v, 'Title', req_),
-    body: (v) => str(v, 'Message', { required: true, max: 5000 }),
-    audience: (v) => oneOf(v || 'all', 'Audience', ['all', 'teacher', 'student']),
-    created_by: (v, body, req) => req.user.id,
-  },
-  listSql: 'SELECT n.*, u.name AS author FROM notices n LEFT JOIN users u ON u.id = n.created_by ORDER BY n.created_at DESC, n.id DESC',
-});
-
-crud(router, {
-  path: '/fee-structures', table: 'fee_structures', label: 'Fee',
-  fields: {
-    class_id: (v) => int(v, 'Class', req_),
-    title: (v) => str(v, 'Title', req_),
-    amount: (v) => num(v, 'Amount', { required: true, min: 0, max: 1e8 }),
-    due_date: (v) => date(v, 'Due date'),
-  },
-  listSql: 'SELECT f.*, c.name AS class_name FROM fee_structures f JOIN classes c ON c.id = f.class_id ORDER BY c.name, f.due_date',
-});
-
-crud(router, {
-  path: '/timetable', table: 'timetable', label: 'Timetable entry',
-  fields: {
-    class_id: (v) => int(v, 'Class', req_),
-    day: (v) => int(v, 'Day', { required: true, min: 1, max: 7 }),
-    start_time: (v) => time(v, 'Start time', req_),
-    end_time: (v) => time(v, 'End time', req_),
-    subject_id: (v) => int(v, 'Subject', req_),
-    room: (v) => str(v, 'Room', { max: 50 }),
-  },
-  afterValidate: (d) => { if (d.end_time <= d.start_time) throw new HttpError(400, 'End time must be after start time'); },
-  listSql: `SELECT t.*, c.name AS class_name, s.code AS subject_code, s.name AS subject_name FROM timetable t
-    JOIN classes c ON c.id = t.class_id JOIN subjects s ON s.id = t.subject_id ORDER BY c.name, t.day, t.start_time`,
-});
-
-// ---- Teachers and students (each is a user + a profile row) ----
-function userFields(body) {
-  return {
-    name: str(body.name, 'Name', req_),
-    username: str(body.username, 'Username', { required: true, max: 60 }),
-    email: str(body.email, 'Email', { max: 120 }),
-    phone: str(body.phone, 'Phone', { max: 20 }),
-  };
-}
-
-function createUser(role, body) {
-  const u = userFields(body);
-  if (!/^[A-Za-z0-9._@-]{3,60}$/.test(u.username)) throw new HttpError(400, 'Username: 3-60 letters, digits, . _ @ -');
-  const password = body.password ? String(body.password) : tempPassword();
-  checkNewPassword(password);
-  const r = run('INSERT INTO users(username, password_hash, role, name, email, phone, must_change_pw) VALUES (?, ?, ?, ?, ?, ?, 1)',
-    u.username, hashPassword(password), role, u.name, u.email, u.phone);
-  return { id: Number(r.lastInsertRowid), password };
-}
-
-function updateUser(id, role, body) {
-  const u = userFields(body);
-  const r = run('UPDATE users SET name = ?, username = ?, email = ?, phone = ? WHERE id = ? AND role = ?', u.name, u.username, u.email, u.phone, id, role);
-  if (!r.changes) throw new HttpError(404, 'User not found');
-}
-
-const teacherProfile = (b) => [str(b.employee_no, 'Employee no', { required: true, max: 30 }), int(b.department_id, 'Department'), str(b.designation, 'Designation', { max: 60 })];
-
-router.get('/teachers', (req, res) => {
-  res.json(all(`SELECT u.id, u.username, u.name, u.email, u.phone, u.active, t.employee_no, t.department_id, t.designation, d.name AS department_name,
-    (SELECT COUNT(*) FROM assignments a WHERE a.teacher_id = u.id) AS subject_count
+// ---- Faculty ----
+router.get('/teachers', async (req, res) => {
+  res.json(await query(`SELECT u.id, u.username, u.name, u.email, u.phone, u.active, t.employee_no, t.department_id, t.designation, d.name AS department_name,
+    (SELECT count(*) FROM lectures l WHERE l.teacher_id = u.id)::int AS lectures
     FROM teachers t JOIN users u ON u.id = t.user_id LEFT JOIN departments d ON d.id = t.department_id ORDER BY u.name`));
 });
 
-router.post('/teachers', (req, res) => {
-  const body = req.body || {};
-  const out = tx(() => {
-    const p = teacherProfile(body);
-    const user = createUser('teacher', body);
-    run('INSERT INTO teachers(user_id, employee_no, department_id, designation) VALUES (?, ?, ?, ?)', user.id, ...p);
-    return user;
+const userFields = (b) => ({
+  name: str(b.name, 'Name', req_),
+  username: str(b.username, 'Username', { required: true, max: 60 }),
+  email: str(b.email, 'Email', { max: 120 }),
+  phone: str(b.phone, 'Phone', { max: 20 }),
+});
+
+async function createUser(t, role, b) {
+  const u = userFields(b);
+  if (!/^[A-Za-z0-9._@-]{3,60}$/.test(u.username)) throw new HttpError(400, 'Username: 3-60 letters, digits, . _ @ -');
+  const password = b.password ? String(b.password) : auth.tempPassword();
+  auth.checkNewPassword(password);
+  const r = await t.one(`INSERT INTO users (username, password_hash, role, name, email, phone, must_change_pw) VALUES ($1, $2, $3, $4, $5, $6, TRUE) RETURNING id`,
+    [u.username, await auth.hashPassword(password), role, u.name, u.email, u.phone]);
+  return { id: r.id, password };
+}
+
+router.post('/teachers', async (req, res) => {
+  const b = req.body || {};
+  const prof = [str(b.employee_no, 'Employee no', { required: true, max: 30 }), int(b.department_id, 'Department'), str(b.designation, 'Designation', { max: 60 })];
+  const out = await tx(async (t) => {
+    const u = await createUser(t, 'teacher', b);
+    await t.query('INSERT INTO teachers (user_id, employee_no, department_id, designation) VALUES ($1, $2, $3, $4)', [u.id, ...prof]);
+    return u;
   });
   audit(req.user.id, 'teacher_created', { id: out.id });
   res.status(201).json({ id: out.id, temp_password: out.password });
 });
 
-router.put('/teachers/:id', (req, res) => {
+router.put('/teachers/:id', async (req, res) => {
   const id = int(req.params.id, 'Id', req_);
-  tx(() => {
-    updateUser(id, 'teacher', req.body || {});
-    run('UPDATE teachers SET employee_no = ?, department_id = ?, designation = ? WHERE user_id = ?', ...teacherProfile(req.body || {}), id);
+  const b = req.body || {};
+  const u = userFields(b);
+  await tx(async (t) => {
+    const r = await t.one("UPDATE users SET name = $2, username = $3, email = $4, phone = $5 WHERE id = $1 AND role = 'teacher' RETURNING id", [id, u.name, u.username, u.email, u.phone]);
+    if (!r) throw new HttpError(404, 'Teacher not found');
+    await t.query('UPDATE teachers SET employee_no = $2, department_id = $3, designation = $4 WHERE user_id = $1',
+      [id, str(b.employee_no, 'Employee no', { required: true, max: 30 }), int(b.department_id, 'Department'), str(b.designation, 'Designation', { max: 60 })]);
   });
+  auth.forgetUser(id);
   audit(req.user.id, 'teacher_updated', { id });
   res.json({ ok: true });
 });
 
-const studentProfile = (b) => [
-  str(b.roll_no, 'Roll no', { required: true, max: 30 }), int(b.class_id, 'Class', req_),
-  str(b.guardian_name, 'Guardian name'), str(b.guardian_phone, 'Guardian phone', { max: 20 }),
-  date(b.dob, 'Date of birth'), str(b.address, 'Address', { max: 500 }), int(b.admission_year, 'Admission year', { min: 1950, max: 2100 }),
-  oneOf(b.blood_group || null, 'Blood group', ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']),
+// Admins manage teachers; the super admin also manages admins (see superadmin.js).
+async function manageableUser(req, id) {
+  const u = await one('SELECT id, role FROM users WHERE id = $1', [id]);
+  if (!u) throw new HttpError(404, 'User not found');
+  if (u.id === req.user.id) throw new HttpError(400, 'Use "Change password" for your own account');
+  const allowed = req.user.role === 'super_admin' ? ['admin', 'teacher'] : ['teacher'];
+  if (!allowed.includes(u.role)) throw new HttpError(403, 'You cannot change this account');
+  return u;
+}
+
+router.post('/users/:id/reset-password', async (req, res) => {
+  const u = await manageableUser(req, int(req.params.id, 'Id', req_));
+  const password = auth.tempPassword();
+  await query('UPDATE users SET password_hash = $2, must_change_pw = TRUE, token_version = token_version + 1 WHERE id = $1', [u.id, await auth.hashPassword(password)]);
+  auth.forgetUser(u.id);
+  audit(req.user.id, 'password_reset', { id: u.id });
+  res.json({ temp_password: password });
+});
+
+router.post('/users/:id/active', async (req, res) => {
+  const u = await manageableUser(req, int(req.params.id, 'Id', req_));
+  const active = !!req.body?.active;
+  await query('UPDATE users SET active = $2, token_version = token_version + 1 WHERE id = $1', [u.id, active]);
+  auth.forgetUser(u.id);
+  audit(req.user.id, active ? 'user_activated' : 'user_deactivated', { id: u.id });
+  res.json({ ok: true });
+});
+
+// ---- Students (no login; paginated because a university has thousands) ----
+router.get('/students', async (req, res) => {
+  const classId = int(req.query.classId, 'Class');
+  const q = str(req.query.q, 'Search', { max: 60 });
+  const page = int(req.query.page, 'Page', { min: 1, max: 10000 }) || 1;
+  const where = ['TRUE'];
+  const p = [];
+  if (classId) { p.push(classId); where.push(`s.class_id = $${p.length}`); }
+  if (q) { p.push(`%${q}%`); where.push(`(s.name ILIKE $${p.length} OR s.roll_no ILIKE $${p.length})`); }
+  const total = (await one(`SELECT count(*)::int AS n FROM students s WHERE ${where.join(' AND ')}`, p)).n;
+  p.push(100, (page - 1) * 100);
+  const rows = await query(`SELECT s.*, c.name AS class_name, (SELECT count(*) FROM face_samples f WHERE f.student_id = s.id)::int AS faces
+    FROM students s JOIN classes c ON c.id = s.class_id WHERE ${where.join(' AND ')} ORDER BY c.name, s.roll_no LIMIT $${p.length - 1} OFFSET $${p.length}`, p);
+  res.json({ total, page, pages: Math.max(1, Math.ceil(total / 100)), rows });
+});
+
+const studentRow = (b) => [
+  str(b.roll_no, 'Roll no', { required: true, max: 30 }), str(b.name, 'Name', req_), int(b.class_id, 'Class', req_),
+  str(b.email, 'Email', { max: 120 }), str(b.phone, 'Phone', { max: 20 }), str(b.guardian_phone, 'Guardian phone', { max: 20 }),
 ];
 
-router.get('/students', (req, res) => {
-  const classId = int(req.query.classId, 'Class');
-  res.json(all(`SELECT u.id, u.username, u.name, u.email, u.phone, u.active, s.roll_no, s.class_id, c.name AS class_name,
-    s.guardian_name, s.guardian_phone, s.dob, s.address, s.admission_year, s.blood_group,
-    (SELECT COUNT(*) FROM face_samples f WHERE f.student_id = u.id) AS face_samples
-    FROM students s JOIN users u ON u.id = s.user_id JOIN classes c ON c.id = s.class_id
-    ${classId ? 'WHERE s.class_id = ?' : ''} ORDER BY c.name, s.roll_no`, ...(classId ? [classId] : [])));
+router.post('/students', async (req, res) => {
+  const r = await one('INSERT INTO students (roll_no, name, class_id, email, phone, guardian_phone) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', studentRow(req.body || {}));
+  forgetGallery(int(req.body.class_id, 'Class'));
+  audit(req.user.id, 'student_created', { id: r.id });
+  res.status(201).json({ id: r.id });
 });
 
-router.post('/students', (req, res) => {
-  const body = req.body || {};
-  const out = tx(() => {
-    const p = studentProfile(body);
-    const user = createUser('student', body);
-    run(`INSERT INTO students(user_id, roll_no, class_id, guardian_name, guardian_phone, dob, address, admission_year, blood_group)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, user.id, ...p);
-    return user;
-  });
-  audit(req.user.id, 'student_created', { id: out.id });
-  res.status(201).json({ id: out.id, temp_password: out.password });
-});
-
-router.put('/students/:id', (req, res) => {
+router.put('/students/:id', async (req, res) => {
   const id = int(req.params.id, 'Id', req_);
-  tx(() => {
-    updateUser(id, 'student', req.body || {});
-    run(`UPDATE students SET roll_no = ?, class_id = ?, guardian_name = ?, guardian_phone = ?, dob = ?, address = ?, admission_year = ?, blood_group = ?
-      WHERE user_id = ?`, ...studentProfile(req.body || {}), id);
-  });
+  const before = await one('SELECT class_id FROM students WHERE id = $1', [id]);
+  if (!before) throw new HttpError(404, 'Student not found');
+  const row = studentRow(req.body || {});
+  await query('UPDATE students SET roll_no = $2, name = $3, class_id = $4, email = $5, phone = $6, guardian_phone = $7, active = $8 WHERE id = $1',
+    [id, ...row, req.body?.active !== false && req.body?.active !== 'false']);
+  forgetGallery(before.class_id);
+  forgetGallery(row[2]);
   audit(req.user.id, 'student_updated', { id });
   res.json({ ok: true });
 });
 
-router.post('/users/:id/reset-password', (req, res) => {
-  const id = int(req.params.id, 'Id', req_);
-  const u = one('SELECT id, role FROM users WHERE id = ?', id);
-  if (!u) throw new HttpError(404, 'User not found');
-  if (u.id === req.user.id) throw new HttpError(400, 'Use "Change password" for your own account');
-  const password = tempPassword();
-  tx(() => {
-    run('UPDATE users SET password_hash = ?, must_change_pw = 1 WHERE id = ?', hashPassword(password), id);
-    run('DELETE FROM sessions WHERE user_id = ?', id);
+// Bulk import: [{ roll_no, name, class (name) or class_id, email, phone, guardian_phone }], up to 2000 a call.
+router.post('/students/import', async (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rows.length || rows.length > 2000) throw new HttpError(400, 'Send 1 to 2000 rows at a time');
+  const classes = new Map((await query('SELECT id, lower(name) AS name FROM classes')).map((c) => [c.name, c.id]));
+  const ok = [];
+  const errors = [];
+  rows.forEach((r, i) => {
+    try {
+      const classId = r.class_id ? int(r.class_id, 'Class') : classes.get(String(r.class || '').trim().toLowerCase());
+      if (!classId) throw new HttpError(400, `Unknown class "${r.class || ''}"`);
+      ok.push(studentRow({ ...r, class_id: classId }));
+    } catch (err) { errors.push({ line: i + 1, roll_no: r.roll_no, error: err.message }); }
   });
-  audit(req.user.id, 'password_reset', { id });
-  res.json({ temp_password: password });
+  const inserted = ok.length ? await query(`INSERT INTO students (roll_no, name, class_id, email, phone, guardian_phone)
+    SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::text[], $6::text[]) ON CONFLICT (roll_no) DO NOTHING RETURNING roll_no`,
+  [0, 1, 2, 3, 4, 5].map((k) => ok.map((r) => r[k]))) : [];
+  const added = new Set(inserted.map((r) => r.roll_no));
+  for (const r of ok) if (!added.has(r[0])) errors.push({ roll_no: r[0], error: 'Roll no already exists' });
+  forgetGallery();
+  audit(req.user.id, 'students_imported', { added: added.size, errors: errors.length });
+  res.json({ added: added.size, errors });
 });
 
-router.post('/users/:id/active', (req, res) => {
-  const id = int(req.params.id, 'Id', req_);
-  if (id === req.user.id) throw new HttpError(400, 'You cannot deactivate yourself');
-  const active = req.body?.active ? 1 : 0;
-  const r = run("UPDATE users SET active = ? WHERE id = ? AND role <> 'admin'", active, id);
-  if (!r.changes) throw new HttpError(404, 'User not found');
-  if (!active) run('DELETE FROM sessions WHERE user_id = ?', id);
-  audit(req.user.id, active ? 'user_activated' : 'user_deactivated', { id });
-  res.json({ ok: true });
+// ---- Face enrolment ----
+router.get('/faces/class/:classId', async (req, res) => {
+  const classId = int(req.params.classId, 'Class', req_);
+  const students = await query('SELECT id, name, roll_no FROM students WHERE class_id = $1 AND active ORDER BY roll_no', [classId]);
+  const samples = await query(`SELECT f.id, f.student_id, f.photo FROM face_samples f JOIN students s ON s.id = f.student_id WHERE s.class_id = $1 ORDER BY f.id`, [classId]);
+  const by = new Map(students.map((s) => [s.id, { ...s, samples: [] }]));
+  for (const f of samples) by.get(f.student_id)?.samples.push({ id: f.id, photo: f.photo });
+  res.json([...by.values()]);
 });
 
-// ---- Who teaches what ----
-router.get('/assignments', (req, res) => {
-  res.json(all(`SELECT a.id, a.teacher_id, a.class_id, a.subject_id, u.name AS teacher_name, c.name AS class_name, s.code AS subject_code, s.name AS subject_name
-    FROM assignments a JOIN users u ON u.id = a.teacher_id JOIN classes c ON c.id = a.class_id JOIN subjects s ON s.id = a.subject_id
-    ORDER BY c.name, s.code`));
-});
-
-router.post('/assignments', (req, res) => {
-  const teacherId = int(req.body?.teacher_id, 'Teacher', req_);
-  const classId = int(req.body?.class_id, 'Class', req_);
-  const subjectId = int(req.body?.subject_id, 'Subject', req_);
-  const existing = one('SELECT id FROM assignments WHERE class_id = ? AND subject_id = ?', classId, subjectId);
-  if (existing) {
-    // Re-assigning a subject to another teacher; open sessions stay with the old teacher until they finish.
-    run('UPDATE assignments SET teacher_id = ? WHERE id = ?', teacherId, existing.id);
-  } else {
-    run('INSERT INTO assignments(teacher_id, class_id, subject_id) VALUES (?, ?, ?)', teacherId, classId, subjectId);
-  }
-  audit(req.user.id, 'assignment_set', { teacherId, classId, subjectId });
-  res.status(201).json({ ok: true });
-});
-
-router.delete('/assignments/:id', (req, res) => {
-  const r = run('DELETE FROM assignments WHERE id = ?', int(req.params.id, 'Id', req_));
-  if (!r.changes) throw new HttpError(404, 'Assignment not found');
-  audit(req.user.id, 'assignment_removed', { id: req.params.id });
-  res.json({ ok: true });
-});
-
-// ---- Fees ----
-function studentDues(classId) {
-  return all(`SELECT u.id, u.name, s.roll_no, c.name AS class_name,
-    COALESCE((SELECT SUM(amount) FROM fee_structures f WHERE f.class_id = s.class_id), 0) AS total,
-    COALESCE((SELECT SUM(p.amount) FROM fee_payments p WHERE p.student_id = s.user_id), 0) AS paid
-    FROM students s JOIN users u ON u.id = s.user_id JOIN classes c ON c.id = s.class_id
-    WHERE u.active = 1 ${classId ? 'AND s.class_id = ?' : ''} ORDER BY c.name, s.roll_no`, ...(classId ? [classId] : []))
-    .map((r) => ({ ...r, due: Math.max(0, r.total - r.paid) }));
+function checkPhoto(photo) {
+  if (photo == null) return null;
+  if (typeof photo !== 'string' || !/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(photo) || photo.length > 200000) throw new HttpError(400, 'Photo must be a small JPEG');
+  return photo;
 }
 
-router.get('/fees/dues', (req, res) => res.json(studentDues(int(req.query.classId, 'Class'))));
+async function enrol(req, student) {
+  const desc = parseDescriptor(req.body?.descriptor);
+  const photo = checkPhoto(req.body?.photo);
+  const n = (await one('SELECT count(*)::int AS n FROM face_samples WHERE student_id = $1', [student.id])).n;
+  if (n >= 10) throw new HttpError(400, 'This student already has 10 photos. Delete one first.');
+  if (!req.body?.force) {
+    // Same face already saved for someone else in the class = probably the wrong name.
+    const others = await query(`SELECT f.descriptor, s.name, s.roll_no FROM face_samples f JOIN students s ON s.id = f.student_id
+      WHERE s.class_id = $1 AND s.id <> $2 AND s.active`, [student.class_id, student.id]);
+    for (const o of others) {
+      if (distance(desc, fromBytes(o.descriptor)) < 0.42) throw new HttpError(409, `This face looks like ${o.name} (${o.roll_no}), who is already enrolled. Check the name.`);
+    }
+  }
+  const r = await one('INSERT INTO face_samples (student_id, descriptor, photo, created_by) VALUES ($1, $2, $3, $4) RETURNING id', [student.id, toBytes(desc), photo, req.user.id]);
+  forgetGallery(student.class_id);
+  audit(req.user.id, 'face_enrolled', { student: student.id, sample: r.id });
+  return r.id;
+}
 
-router.get('/fees/payments', (req, res) => {
-  const studentId = int(req.query.studentId, 'Student');
-  res.json(all(`SELECT p.*, f.title AS fee_title, u.name AS student_name, s.roll_no, r.name AS recorded_by_name
-    FROM fee_payments p JOIN fee_structures f ON f.id = p.fee_id JOIN users u ON u.id = p.student_id
-    JOIN students s ON s.user_id = p.student_id LEFT JOIN users r ON r.id = p.recorded_by
-    ${studentId ? 'WHERE p.student_id = ?' : ''} ORDER BY p.paid_on DESC, p.id DESC LIMIT 500`, ...(studentId ? [studentId] : [])));
+router.post('/faces/student/:id', async (req, res) => {
+  const st = await one('SELECT id, class_id FROM students WHERE id = $1', [int(req.params.id, 'Student', req_)]);
+  if (!st) throw new HttpError(404, 'Student not found');
+  res.status(201).json({ id: await enrol(req, st) });
 });
 
-router.post('/fees/payments', (req, res) => {
-  const b = req.body || {};
-  const studentId = int(b.student_id, 'Student', req_);
-  const feeId = int(b.fee_id, 'Fee', req_);
-  const amount = num(b.amount, 'Amount', { required: true, min: 0.01, max: 1e8 });
-  const paidOn = date(b.paid_on, 'Paid on') || today();
-  const mode = oneOf(b.mode || 'cash', 'Mode', ['cash', 'upi', 'card', 'bank', 'cheque']);
-  const out = tx(() => {
-    const st = one('SELECT class_id FROM students WHERE user_id = ?', studentId);
-    if (!st) throw new HttpError(404, 'Student not found');
-    const fee = one('SELECT * FROM fee_structures WHERE id = ?', feeId);
-    if (!fee || fee.class_id !== st.class_id) throw new HttpError(400, "This fee is not for the student's class");
-    const paid = one('SELECT COALESCE(SUM(amount), 0) AS n FROM fee_payments WHERE student_id = ? AND fee_id = ?', studentId, feeId).n;
-    if (amount > fee.amount - paid + 1e-9) throw new HttpError(400, `Only ${(fee.amount - paid).toFixed(2)} is due for this fee`);
-    const r = run('INSERT INTO fee_payments(student_id, fee_id, amount, paid_on, mode, receipt_no, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      studentId, feeId, amount, paidOn, mode, `tmp-${Date.now()}-${Math.random()}`, req.user.id);
-    const id = Number(r.lastInsertRowid);
-    const receipt = `R${paidOn.slice(0, 4)}-${String(id).padStart(5, '0')}`;
-    run('UPDATE fee_payments SET receipt_no = ? WHERE id = ?', receipt, id);
-    return { id, receipt_no: receipt };
-  });
-  audit(req.user.id, 'fee_payment', { ...out, studentId, feeId, amount });
-  res.status(201).json(out);
+// For bulk photo upload where every file is named by roll number (e.g. BCA3A01.jpg).
+router.post('/faces/by-roll', async (req, res) => {
+  const roll = str(req.body?.roll_no, 'Roll no', req_);
+  const st = await one('SELECT id, class_id FROM students WHERE lower(roll_no) = lower($1)', [roll]);
+  if (!st) throw new HttpError(404, `No student with roll no ${roll}`);
+  res.status(201).json({ id: await enrol(req, st) });
 });
 
-// ---- Attendance oversight ----
-router.get('/attendance/sessions', (req, res) => {
+router.delete('/faces/:id', async (req, res) => {
+  const f = await one('DELETE FROM face_samples f USING students s WHERE f.id = $1 AND s.id = f.student_id RETURNING s.class_id', [int(req.params.id, 'Id', req_)]);
+  if (!f) throw new HttpError(404, 'Photo not found');
+  forgetGallery(f.class_id);
+  res.json({ ok: true });
+});
+
+// ---- Lecture allotment (timetable) ----
+const LECTURE_SQL = `SELECT l.*, to_char(l.start_time, 'HH24:MI') AS start_time, to_char(l.end_time, 'HH24:MI') AS end_time,
+  u.name AS teacher_name, c.name AS class_name, s.code AS subject_code, s.name AS subject_name, r.name AS room_name
+  FROM lectures l JOIN users u ON u.id = l.teacher_id JOIN classes c ON c.id = l.class_id JOIN subjects s ON s.id = l.subject_id
+  LEFT JOIN rooms r ON r.id = l.room_id`;
+
+router.get('/lectures', async (req, res) => {
+  const classId = int(req.query.classId, 'Class');
+  const teacherId = int(req.query.teacherId, 'Teacher');
+  const where = [];
+  const p = [];
+  if (classId) { p.push(classId); where.push(`l.class_id = $${p.length}`); }
+  if (teacherId) { p.push(teacherId); where.push(`l.teacher_id = $${p.length}`); }
+  res.json(await query(`${LECTURE_SQL} ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY l.day, l.start_time, c.name`, p));
+});
+
+async function lectureFromBody(b, id = null) {
+  const l = {
+    teacher_id: int(b.teacher_id, 'Teacher', req_), class_id: int(b.class_id, 'Class', req_), subject_id: int(b.subject_id, 'Subject', req_),
+    room_id: int(b.room_id, 'Room'), day: int(b.day, 'Day', { required: true, min: 1, max: 7 }),
+    start_time: time(b.start_time, 'Start time', req_), end_time: time(b.end_time, 'End time', req_),
+  };
+  if (l.end_time <= l.start_time) throw new HttpError(400, 'End time must be after start time');
+  // Nobody can be in two places at once: same teacher, class or room overlapping on the same day.
+  const clash = await one(`SELECT l.id, u.name AS teacher, c.name AS class, r.name AS room,
+      l.teacher_id = $1 AS t, l.class_id = $2 AS c, l.room_id IS NOT DISTINCT FROM $3 AND $3::int IS NOT NULL AS r
+    FROM lectures l JOIN users u ON u.id = l.teacher_id JOIN classes c ON c.id = l.class_id LEFT JOIN rooms r ON r.id = l.room_id
+    WHERE l.day = $4 AND l.start_time < $6::time AND l.end_time > $5::time AND ($7::int IS NULL OR l.id <> $7)
+      AND (l.teacher_id = $1 OR l.class_id = $2 OR (l.room_id = $3 AND $3::int IS NOT NULL)) LIMIT 1`,
+  [l.teacher_id, l.class_id, l.room_id, l.day, l.start_time, l.end_time, id]);
+  if (clash) throw new HttpError(409, `Time clash: ${clash.t ? `${clash.teacher} already teaches then` : clash.c ? `${clash.class} already has a lecture then` : `room ${clash.room} is already booked`}`);
+  return l;
+}
+
+router.post('/lectures', async (req, res) => {
+  const l = await lectureFromBody(req.body || {});
+  const cols = Object.keys(l);
+  const r = await one(`INSERT INTO lectures (${cols.join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`, Object.values(l));
+  audit(req.user.id, 'lecture_created', { id: r.id, ...l });
+  res.status(201).json({ id: r.id });
+});
+
+router.put('/lectures/:id', async (req, res) => {
+  const id = int(req.params.id, 'Id', req_);
+  const l = await lectureFromBody(req.body || {}, id);
+  const cols = Object.keys(l);
+  const r = await one(`UPDATE lectures SET ${cols.map((c, i) => `${c} = $${i + 2}`).join(', ')} WHERE id = $1 RETURNING id`, [id, ...Object.values(l)]);
+  if (!r) throw new HttpError(404, 'Lecture not found');
+  audit(req.user.id, 'lecture_updated', { id, ...l });
+  res.json({ ok: true });
+});
+
+router.delete('/lectures/:id', async (req, res) => {
+  const id = int(req.params.id, 'Id', req_);
+  if (await one('SELECT 1 FROM attendance_sessions WHERE lecture_id = $1 LIMIT 1', [id])) throw new HttpError(409, 'Attendance has been taken for this lecture, so it cannot be deleted');
+  await query('DELETE FROM lectures WHERE id = $1', [id]);
+  audit(req.user.id, 'lecture_deleted', { id });
+  res.json({ ok: true });
+});
+
+// ---- Attendance records and reports ----
+router.get('/sessions', async (req, res) => {
   const classId = int(req.query.classId, 'Class');
   const day = date(req.query.date, 'Date');
+  const status = oneOf(req.query.status || null, 'Status', ['scanning', 'review', 'queued', 'saved', 'cancelled']);
   const where = [];
-  const params = [];
-  if (classId) { where.push('a.class_id = ?'); params.push(classId); }
-  if (day) { where.push('a.date = ?'); params.push(day); }
-  res.json(all(`SELECT a.*, c.name AS class_name, s.code AS subject_code, s.name AS subject_name, u.name AS teacher_name,
-    (SELECT COUNT(*) FROM attendance_marks m WHERE m.session_id = a.id AND m.status = 'present') AS present,
-    (SELECT COUNT(*) FROM attendance_marks m WHERE m.session_id = a.id AND m.status = 'present' AND m.source = 'camera') AS by_camera
+  const p = [];
+  if (classId) { p.push(classId); where.push(`a.class_id = $${p.length}`); }
+  if (day) { p.push(day); where.push(`a.date = $${p.length}`); }
+  if (status) { p.push(status); where.push(`a.status = $${p.length}`); }
+  res.json(await query(`SELECT a.id, a.date::text AS date, a.status, a.registered_count, a.max_faces, a.recognised_count, a.present_count, a.started_at, a.saved_at,
+    c.name AS class_name, s.code AS subject_code, s.name AS subject_name, u.name AS teacher_name, r.name AS room_name
     FROM attendance_sessions a JOIN classes c ON c.id = a.class_id JOIN subjects s ON s.id = a.subject_id JOIN users u ON u.id = a.teacher_id
-    ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY a.date DESC, a.id DESC LIMIT 300`, ...params));
+    LEFT JOIN rooms r ON r.id = a.room_id ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY a.date DESC, a.started_at DESC LIMIT 300`, p));
 });
 
-router.get('/attendance/sessions/:id', (req, res) => {
+router.get('/sessions/:id', async (req, res) => {
   const id = int(req.params.id, 'Id', req_);
-  const s = one('SELECT * FROM attendance_sessions WHERE id = ?', id);
-  if (!s) throw new HttpError(404, 'Session not found');
-  res.json({
-    session: s,
-    marks: all(`SELECT m.*, u.name, st.roll_no FROM attendance_marks m JOIN users u ON u.id = m.student_id JOIN students st ON st.user_id = m.student_id
-      WHERE m.session_id = ? ORDER BY st.roll_no`, id),
+  const s = await one(`SELECT a.*, a.date::text AS date, c.name AS class_name, sub.code AS subject_code, sub.name AS subject_name, u.name AS teacher_name
+    FROM attendance_sessions a JOIN classes c ON c.id = a.class_id JOIN subjects sub ON sub.id = a.subject_id JOIN users u ON u.id = a.teacher_id WHERE a.id = $1`, [id]);
+  if (!s) throw new HttpError(404, 'Attendance not found');
+  const records = await query(`SELECT r.*, st.name, st.roll_no FROM attendance_records r JOIN students st ON st.id = r.student_id WHERE r.session_id = $1 ORDER BY st.roll_no`, [id]);
+  res.json({ session: s, records });
+});
+
+// Correction after saving (e.g. a student proves they were present). Logged in the audit trail.
+router.put('/sessions/:id/records/:studentId', async (req, res) => {
+  const id = int(req.params.id, 'Id', req_);
+  const studentId = int(req.params.studentId, 'Student', req_);
+  const status = oneOf(req.body?.status, 'Status', ['P', 'A'], req_);
+  const done = await tx(async (t) => {
+    const r = await t.one("UPDATE attendance_records SET status = $3, source = 'manual', confidence = NULL WHERE session_id = $1 AND student_id = $2 RETURNING 1", [id, studentId, status]);
+    if (!r) return false;
+    await t.query("UPDATE attendance_sessions SET present_count = (SELECT count(*) FROM attendance_records WHERE session_id = $1 AND status = 'P') WHERE id = $1", [id]);
+    return true;
   });
-});
-
-// Admin correction of a submitted record (e.g. student proves they were present).
-router.put('/attendance/sessions/:id/marks', (req, res) => {
-  const id = int(req.params.id, 'Id', req_);
-  const studentId = int(req.body?.student_id, 'Student', req_);
-  const status = oneOf(req.body?.status, 'Status', ['present', 'absent'], req_);
-  const r = run(`UPDATE attendance_marks SET status = ?, source = 'manual', distance = NULL, marked_at = datetime('now')
-    WHERE session_id = ? AND student_id = ?`, status, id, studentId);
-  if (!r.changes) throw new HttpError(404, 'Mark not found');
+  if (!done) throw new HttpError(404, 'Record not found');
   audit(req.user.id, 'attendance_corrected', { session: id, studentId, status });
   res.json({ ok: true });
 });
 
-router.get('/reports/attendance', (req, res) => {
-  const classId = int(req.query.classId, 'Class', req_);
-  const cls = getClass(classId);
-  const report = classAttendanceReport(classId, int(req.query.subjectId, 'Subject'));
-  if (req.query.format !== 'csv') return res.json({ class: cls, ...report });
-  const head = ['Roll no', 'Name', ...report.subjects.map((s) => `${s.code} %`), 'Present', 'Total', 'Overall %'];
-  const body = report.students.map((st) => [st.roll_no, st.name, ...report.subjects.map((s) => st.bySubject[s.id]?.pct ?? ''), st.present, st.total, st.pct ?? '']);
-  res.set('Content-Type', 'text/csv; charset=utf-8');
-  res.set('Content-Disposition', `attachment; filename="attendance-${cls.name.replace(/[^A-Za-z0-9-]+/g, '_')}.csv"`);
-  res.send(`﻿${csv([head, ...body])}`);
-});
-
-// ---- Settings and audit ----
-router.get('/settings', (req, res) => res.json(getSettings()));
-
-router.put('/settings', (req, res) => {
-  const b = req.body || {};
-  const values = {
-    college_name: str(b.college_name, 'College name', { required: true, max: 120 }),
-    college_short: str(b.college_short, 'Short name / logo letters', { required: true, max: 4 }),
-    academic_session: str(b.academic_session, 'Academic session', { required: true, max: 20 }),
-    library_fine_per_day: String(num(b.library_fine_per_day, 'Library fine per day', { required: true, min: 0, max: 1000 })),
-    library_issue_days: String(int(b.library_issue_days, 'Library issue days', { required: true, min: 1, max: 180 })),
-    feedback_open: b.feedback_open === '1' || b.feedback_open === 1 || b.feedback_open === true ? '1' : '0',
-    feedback_cycle: str(b.feedback_cycle, 'Feedback cycle', { required: true, max: 60 }),
-    match_threshold: String(num(b.match_threshold, 'Match threshold', { required: true, min: 0.3, max: 0.7 })),
-    min_face_confidence: String(num(b.min_face_confidence, 'Face detection confidence', { required: true, min: 0.2, max: 0.95 })),
-  };
-  tx(() => { for (const [k, v] of Object.entries(values)) run('INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)', k, v); });
-  audit(req.user.id, 'settings_updated', values);
-  res.json({ ok: true });
-});
-
-router.get('/audit', (req, res) => {
-  res.json(all(`SELECT a.id, a.action, a.detail, a.at, u.name AS user_name FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
-    ORDER BY a.id DESC LIMIT 300`));
+router.get('/reports/class/:classId', async (req, res) => {
+  const classId = int(req.params.classId, 'Class', req_);
+  const from = date(req.query.from, 'From') || '2000-01-01';
+  const to = date(req.query.to, 'To') || '2999-12-31';
+  const cls = await one('SELECT * FROM classes WHERE id = $1', [classId]);
+  if (!cls) throw new HttpError(404, 'Class not found');
+  const rows = await query(`SELECT st.id, st.roll_no, st.name,
+      count(r.session_id)::int AS total, count(*) FILTER (WHERE r.status = 'P')::int AS present
+    FROM students st LEFT JOIN attendance_records r ON r.student_id = st.id
+      AND r.session_id IN (SELECT id FROM attendance_sessions WHERE class_id = $1 AND status = 'saved' AND date BETWEEN $2 AND $3)
+    WHERE st.class_id = $1 AND st.active GROUP BY st.id ORDER BY st.roll_no`, [classId, from, to]);
+  const list = rows.map((r) => ({ ...r, pct: r.total ? Math.round((r.present / r.total) * 1000) / 10 : null }));
+  if (req.query.format === 'csv') {
+    return sendCsv(res, `attendance-${cls.name}.csv`, [['Roll no', 'Name', 'Present', 'Total', '%'], ...list.map((r) => [r.roll_no, r.name, r.present, r.total, r.pct ?? ''])]);
+  }
+  res.json({ class: cls, from, to, students: list });
 });
 
 module.exports = router;

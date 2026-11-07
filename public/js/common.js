@@ -1,7 +1,19 @@
-// Shared helpers for every page: API calls, DOM building, tables, forms, dialogs, charts, app shell.
+// Shared helpers: API calls, DOM building, tables, forms, dialogs, charts, preloader, app shell.
 import { icon } from './icons.js';
 
 export { icon };
+
+// ---- Preloader: the logo stays on screen for at least 1.5 s from page start ----
+const PRELOAD_MS = 1500;
+export function hidePreloader() {
+  const el = document.getElementById('preloader');
+  if (!el || el.classList.contains('done')) return;
+  setTimeout(() => {
+    el.classList.add('done');
+    setTimeout(() => el.remove(), 400);
+  }, Math.max(0, PRELOAD_MS - performance.now()));
+}
+setTimeout(hidePreloader, 8000); // never let it block the page
 
 export async function api(path, { method = 'GET', body } = {}) {
   const opts = { method, headers: {}, credentials: 'same-origin' };
@@ -37,34 +49,27 @@ export function h(tag, props, ...children) {
     else if (['checked', 'disabled', 'selected', 'required', 'multiple'].includes(k)) el[k] = true;
     else el.setAttribute(k, v === true ? '' : v);
   }
-  for (const c of children.flat(Infinity)) {
-    if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
-  }
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
   if (value !== undefined) el.value = value;
   return el;
 }
 
-export const fmtDate = (s) => (s ? new Date(s.length === 10 ? `${s}T00:00:00` : `${s.replace(' ', 'T')}Z`).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }) : '-');
-export const fmtDateTime = (s) => (s ? new Date(`${s.replace(' ', 'T')}Z`).toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-');
-export const money = (n) => `Rs ${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
-export const pctText = (p) => (p == null ? '-' : `${p}%`);
 export const DAYS = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-
-export function pctBadge(p) {
-  if (p == null) return h('span', { class: 'badge', text: 'No classes yet' });
-  return h('span', { class: `badge ${p >= 75 ? 'ok' : p >= 60 ? 'warn' : 'bad'}`, text: `${p}%` });
-}
+export const fmtDate = (s) => (s ? new Date(String(s).length === 10 ? `${s}T00:00:00` : s).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '-');
+export const fmtTime = (s) => (s ? new Date(s).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '-');
+export const fmtDateTime = (s) => (s ? new Date(s).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-');
+export const initials = (name) => String(name || '?').split(/\s+/).filter((w) => /^[A-Za-z]/.test(w) && !/^(dr|prof|mr|mrs|ms)\.?$/i.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
+export const pctKind = (p) => (p == null ? '' : p >= 75 ? 'ok' : p >= 60 ? 'warn' : 'bad');
 
 // ---- Toasts and dialogs ----
 let toastBox;
-export function toast(message, kind = 'ok') {
+export function toast(message, kind = '') {
   toastBox ??= document.body.appendChild(h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' }));
-  const t = h('div', { class: `toast ${kind === 'error' ? 'error' : ''}`, text: message });
+  const t = h('div', { class: `toast ${kind}`, text: message });
   toastBox.append(t);
-  setTimeout(() => t.remove(), kind === 'error' ? 6000 : 3000);
+  setTimeout(() => t.remove(), kind === 'error' ? 6500 : 4000);
 }
-
-export function showError(err) { toast(err?.message || String(err), 'error'); }
+export const showError = (err) => toast(err?.message || String(err), 'error');
 
 export function modal(content, buttons) {
   return new Promise((resolve) => {
@@ -78,27 +83,25 @@ export function modal(content, buttons) {
 }
 
 export function confirmBox(message, { ok = 'Yes', danger = false, title } = {}) {
-  return modal(h('div', null, title && h('h2', { text: title }), h('p', { class: 'pre', text: message })), [
-    { label: 'Cancel', value: false },
-    { label: ok, value: true, class: danger ? 'danger' : 'primary' },
-  ]).then(Boolean);
+  return modal(h('div', null, title && h('h2', { text: title }), h('p', { class: 'pre', text: message })),
+    [{ label: 'Cancel', value: false }, { label: ok, value: true, class: danger ? 'danger' : 'primary' }]).then(Boolean);
 }
 
 export function showSecret(title, label, secret) {
   return modal(h('div', null, h('h2', { text: title }), h('p', { class: 'muted', text: label }), h('div', { class: 'secret', text: secret }),
-    h('p', { class: 'muted small', text: 'It is shown only once. They must change it after logging in.' })), [{ label: 'Done', value: true, class: 'primary' }]);
+    h('p', { class: 'muted small', text: 'Shown only once. It must be changed at the first login.' })), [{ label: 'Done', value: true, class: 'primary' }]);
 }
 
-// Wraps an async click handler: disables the button while it runs and reports errors.
+// Disables the clicked button while the async handler runs and reports errors.
 export function busy(fn) {
   return async (e) => {
-    const btn = e?.currentTarget;
+    const btn = e?.currentTarget instanceof HTMLButtonElement ? e.currentTarget : null;
     if (btn) btn.disabled = true;
     try { await fn(e); } catch (err) { showError(err); } finally { if (btn) btn.disabled = false; }
   };
 }
 
-// ---- Tables ----
+// ---- Tables, forms ----
 export function table(columns, rows, empty = 'Nothing here yet.') {
   if (!rows.length) return h('div', { class: 'empty', text: empty });
   return h('div', { class: 'table-wrap' }, h('table', null,
@@ -109,8 +112,7 @@ export function table(columns, rows, empty = 'Nothing here yet.') {
     }))))));
 }
 
-// ---- Forms ----
-// fields: [{ name, label, type, options: [{value,label}], required, full, placeholder, min, max, step }]
+// fields: [{ name, label, type, options: [{value,label}], required, full, placeholder, min, max, step, hint, default }]
 export function buildForm(fields, { values = {}, submitLabel = 'Save', onSubmit, onCancel } = {}) {
   const inputs = {};
   const grid = h('div', { class: 'form-grid' }, fields.map((f) => {
@@ -130,8 +132,7 @@ export function buildForm(fields, { values = {}, submitLabel = 'Save', onSubmit,
     return h('div', { class: `field ${f.full ? 'full' : ''}` }, h('label', { for: id, text: f.label + (f.required ? ' *' : '') }), input, f.hint && h('span', { class: 'muted small', text: f.hint }));
   }));
   const submit = h('button', { class: 'primary', type: 'submit', text: submitLabel });
-  const form = h('form', { novalidate: false }, grid, h('div', { class: 'form-actions' },
-    onCancel && h('button', { type: 'button', text: 'Cancel', onclick: onCancel }), submit));
+  const form = h('form', null, grid, h('div', { class: 'form-actions' }, onCancel && h('button', { type: 'button', text: 'Cancel', onclick: onCancel }), submit));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const data = {};
@@ -143,33 +144,41 @@ export function buildForm(fields, { values = {}, submitLabel = 'Save', onSubmit,
   return form;
 }
 
-export function selectEl(options, { value = '', placeholder = 'Choose...', onchange } = {}) {
-  return h('select', { onchange, value: String(value) }, h('option', { value: '', text: placeholder }),
+export function selectEl(options, { value = '', placeholder = 'Choose...', onchange, label } = {}) {
+  return h('select', { onchange, value: String(value), 'aria-label': label || placeholder }, h('option', { value: '', text: placeholder }),
     options.map((o) => h('option', { value: String(o.value), text: o.label })));
 }
 
-// ---- Shared views ----
-export function timetableView(entries, { showClass = false } = {}) {
-  if (!entries.length) return h('div', { class: 'empty', text: 'No timetable has been set yet.' });
-  const days = [...new Set(entries.map((e) => e.day))].sort();
-  return h('div', null, days.map((d) => h('div', { class: 'tt-day' }, h('h3', { text: DAYS[d] }),
-    table([
-      { label: 'Time', render: (e) => `${e.start_time} - ${e.end_time}` },
-      showClass && { label: 'Class', key: 'class_name' },
-      { label: 'Subject', render: (e) => `${e.subject_code} ${e.subject_name}` },
-      !showClass && { label: 'Teacher', key: 'teacher_name' },
-      { label: 'Room', key: 'room' },
-    ].filter(Boolean), entries.filter((e) => e.day === d)))));
+// ---- Visual blocks ----
+export function statCard(iconName, label, value, sub, kind = '') {
+  return h('div', { class: 'stat' }, h('div', { class: `stat-icon ${kind}` }, icon(iconName, 20)),
+    h('div', null, h('div', { class: 'label', text: label }), h('div', { class: `value ${String(value ?? '').length > 8 ? 'long' : ''}`, text: value ?? '-' }), sub && h('div', { class: 'sub', text: sub })));
 }
 
-export async function noticesView(main) {
-  const list = await api('/api/notices');
-  main.append(list.length ? h('div', null, list.map((n) => h('div', { class: 'card' },
-    h('div', { class: 'between' }, h('h2', { text: n.title }), h('span', { class: 'muted small', text: `${fmtDate(n.created_at)}${n.author ? ` · ${n.author}` : ''}` })),
-    h('p', { class: 'pre', text: n.body }))))
-    : h('div', { class: 'card empty', text: 'No notices.' }));
+export function cardTitle(iconName, title, ...right) {
+  return h('div', { class: 'between' }, h('div', { class: 'card-title' }, icon(iconName), h('h2', { text: title })), right.filter(Boolean).length ? h('div', { class: 'row' }, right) : null);
 }
 
+export function bars(rows) {
+  if (!rows.length) return h('div', { class: 'empty', text: 'No data yet.' });
+  return h('div', { class: 'bars' }, rows.map((r) => {
+    const p = r.max ? (r.value / r.max) * 100 : 0;
+    const fill = h('div', { class: `bar-fill ${pctKind(p)}` });
+    fill.style.width = `${Math.max(0, Math.min(100, p))}%`;
+    return h('div', { class: 'bar-row' }, h('span', { class: 'name', title: r.label, text: r.label }), h('div', { class: 'bar-track' }, fill), h('span', { class: 'num', text: r.max ? `${Math.round(p)}%` : '-' }));
+  }));
+}
+
+export function columns(points) {
+  if (!points.length) return h('div', { class: 'empty', text: 'No data yet.' });
+  return h('div', { class: 'colchart' }, points.map((p) => {
+    const bar = h('div', { class: 'colbar', title: `${p.label}: ${p.value}%` });
+    bar.style.height = `${Math.max(1, p.value)}%`;
+    return h('div', { class: 'col' }, h('span', { class: 'colval', text: `${p.value}%` }), bar, h('span', { class: 'collabel', text: p.label }));
+  }));
+}
+
+// ---- Password page (shared) ----
 function passwordView(me) {
   return async (main) => {
     if (me.must_change_pw) main.append(h('div', { class: 'notice warn', text: 'You are using a one-time password. Set your own password to continue.' }));
@@ -182,160 +191,80 @@ function passwordView(me) {
       onSubmit: async (d) => {
         if (d.next !== d.again) throw new Error('The two new passwords do not match');
         await api('/api/me/password', { method: 'POST', body: { current: d.current, next: d.next } });
-        toast('Password changed');
+        toast('Password changed', 'ok');
         if (me.must_change_pw) location.href = location.pathname;
       },
     })));
   };
 }
 
-// ---- Visual building blocks ----
-const initials = (name) => String(name || '?').split(/\s+/).filter((w) => /^[A-Za-z]/.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
-
-export function avatar(name, photo, cls = '') {
-  return h('span', { class: `avatar ${cls}` }, photo ? h('img', { src: photo, alt: '' }) : initials(name));
-}
-
-export function statCard(iconName, label, value, sub, kind = '') {
-  return h('div', { class: 'stat' }, h('div', { class: `stat-icon ${kind}` }, icon(iconName, 20)),
-    h('div', null, h('div', { class: 'label', text: label }), h('div', { class: 'value', text: value ?? '-' }), sub && h('div', { class: 'sub', text: sub })));
-}
-
-export function cardTitle(iconName, title, ...right) {
-  return h('div', { class: 'between' }, h('div', { class: 'card-title' }, icon(iconName), h('h2', { text: title })), right.length ? h('div', { class: 'row' }, right) : null);
-}
-
-const kindFor = (p) => (p == null ? '' : p >= 75 ? 'ok' : p >= 60 ? 'warn' : 'bad');
-
-// Ring chart for one percentage.
-export function donut(pct, label, kind = kindFor(pct)) {
-  const NS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 42 42');
-  const circle = (cls, dash) => {
-    const c = document.createElementNS(NS, 'circle');
-    c.setAttribute('cx', '21'); c.setAttribute('cy', '21'); c.setAttribute('r', '15.915');
-    c.setAttribute('fill', 'none'); c.setAttribute('stroke-width', '5'); c.setAttribute('class', cls);
-    if (dash != null) { c.setAttribute('stroke-dasharray', `${dash} ${100 - dash}`); c.setAttribute('stroke-linecap', 'round'); }
-    return c;
-  };
-  svg.append(circle('track'));
-  if (pct) svg.append(circle(`val ${kind}`, Math.max(0, Math.min(100, pct))));
-  return h('div', { class: 'donut' }, svg, h('div', { class: 'center' }, h('div', null, h('strong', { text: pct == null ? '-' : `${Math.round(pct)}%` }), h('span', { text: label }))));
-}
-
-// Horizontal bars: rows [{ label, value, max, text }]
-export function bars(rows, { pctKind = false } = {}) {
-  if (!rows.length) return h('div', { class: 'empty', text: 'No data yet.' });
-  return h('div', { class: 'bars' }, rows.map((r) => {
-    const p = r.max ? (r.value / r.max) * 100 : 0;
-    const fill = h('div', { class: `bar-fill ${pctKind ? kindFor(p) : ''}` });
-    fill.style.width = `${Math.max(0, Math.min(100, p))}%`;
-    return h('div', { class: 'bar-row' }, h('span', { class: 'name', title: r.label, text: r.label }), h('div', { class: 'bar-track' }, fill), h('span', { class: 'num', text: r.text ?? r.value }));
-  }));
-}
-
-// Vertical columns: points [{ label, value, text }], value 0..max
-export function columns(points, max = 100) {
-  if (!points.length) return h('div', { class: 'empty', text: 'No data yet.' });
-  return h('div', { class: 'colchart' }, points.map((p) => {
-    const bar = h('div', { class: 'colbar', title: `${p.label}: ${p.text ?? p.value}` });
-    bar.style.height = `${Math.max(1, (p.value / (max || 1)) * 100)}%`;
-    return h('div', { class: 'col' }, h('span', { class: 'colval', text: p.text ?? p.value }), bar, h('span', { class: 'collabel', text: p.label }));
-  }));
-}
-
-export function dateChip(d) {
-  const dt = new Date(`${d}T00:00:00`);
-  return h('div', { class: 'date-chip' }, h('strong', { text: dt.getDate() }), h('span', { text: dt.toLocaleString('en', { month: 'short' }) }));
-}
-
-export function printButton(label = 'Print') {
-  return h('button', { class: 'no-print', onclick: () => window.print() }, icon('printer', 16), label);
-}
-
-// Generic list + add/edit form for one master table (admin pages).
-export function crudView({ endpoint, columns: cols, fields, intro, toValues, onCreated, rowActions, filter, canDelete = true, extra }) {
-  return async (main) => {
-    const fieldList = await fields();
-    const formCard = h('div', { class: 'card hidden' });
-    const listCard = h('div', { class: 'card' });
-    let filterEl = null;
-    if (filter) filterEl = selectEl(await filter.options(), { placeholder: filter.placeholder, onchange: () => load() });
-    main.append(
-      h('div', { class: 'between' }, h('p', { class: 'muted', text: intro || '' }),
-        h('div', { class: 'row' }, filterEl, extra?.(load), h('button', { class: 'primary', text: 'Add new', onclick: () => openForm(null) }))),
-      formCard, listCard);
-
-    function openForm(row) {
-      formCard.replaceChildren(h('h2', { text: row ? 'Edit' : 'Add new' }), buildForm(fieldList.filter((f) => !(row && f.createOnly)), {
-        values: row ? (toValues ? toValues(row) : row) : (filterEl?.value ? { [filter.param]: filterEl.value } : {}),
-        submitLabel: row ? 'Save changes' : 'Add',
-        onCancel: () => formCard.classList.add('hidden'),
-        onSubmit: async (d) => {
-          if (row) {
-            await api(`${endpoint}/${row.id}`, { method: 'PUT', body: d });
-            toast('Saved');
-          } else {
-            const r = await api(endpoint, { method: 'POST', body: d });
-            toast('Added');
-            if (onCreated) await onCreated(r, d);
-          }
-          formCard.classList.add('hidden');
-          await load();
-        },
-      }));
-      formCard.classList.remove('hidden');
-      formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-
-    async function load() {
-      const rows = await api(filterEl?.value ? `${endpoint}?${filter.param}=${filterEl.value}` : endpoint);
-      listCard.replaceChildren(table([...cols, {
-        label: '', class: 'actions', render: (r) => h('span', { class: 'row end' },
-          h('button', { class: 'sm', text: 'Edit', onclick: () => openForm(r) }),
-          rowActions?.(r, load),
-          canDelete && h('button', {
-            class: 'sm danger', text: 'Delete', onclick: busy(async () => {
-              if (!await confirmBox('Delete this record?', { ok: 'Delete', danger: true })) return;
-              await api(`${endpoint}/${r.id}`, { method: 'DELETE' });
-              toast('Deleted');
-              await load();
-            }),
-          })),
-      }], rows));
-    }
-    await load();
-  };
+// ---- Notifications bell (polled; cheap query, every 20 s) ----
+function notificationsBell() {
+  const dot = h('span', { class: 'dot hidden' });
+  const btn = h('button', { class: 'icon-btn bell', 'aria-label': 'Notifications', title: 'Notifications' }, icon('bell'), dot);
+  let panel = null;
+  let last = null;
+  // silent: the caller already told the user (e.g. right after submitting).
+  async function refresh(silent = false) {
+    try {
+      const d = await api('/api/notifications');
+      if (!silent && last && d.list[0] && d.list[0].id !== last && !d.list[0].read) toast(d.list[0].title, 'ok');
+      last = d.list[0]?.id ?? last;
+      dot.textContent = d.unread;
+      dot.classList.toggle('hidden', !d.unread);
+      if (panel) render(d);
+    } catch { /* offline for a moment */ }
+  }
+  function render(d) {
+    panel.replaceChildren(h('div', { class: 'head' }, h('strong', { text: 'Notifications' }),
+      h('button', { class: 'sm', text: 'Mark all read', onclick: busy(async () => { await api('/api/notifications/read', { method: 'POST' }); await refresh(); }) })),
+    d.list.length ? d.list.map((n) => h('a', { class: `notif ${n.read ? '' : 'unread'}`, href: n.link || '#', onclick: () => { api('/api/notifications/read', { method: 'POST', body: { id: n.id } }).then(refresh); close(); } },
+      h('strong', { text: n.title }), h('span', { text: `${n.body || ''} · ${fmtDateTime(n.created_at)}` })))
+      : h('div', { class: 'empty', text: 'No notifications.' }));
+  }
+  function close() { panel?.remove(); panel = null; }
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (panel) return close();
+    panel = h('div', { class: 'notif-panel' });
+    panel.addEventListener('click', (ev) => ev.stopPropagation());
+    document.body.append(panel);
+    render((await api('/api/notifications')));
+  });
+  document.addEventListener('click', close);
+  refresh(true);
+  setInterval(() => refresh(), 20000);
+  return { el: btn, refresh };
 }
 
 // ---- App shell ----
-// views: [{ id, label, icon, group, render(main, ctx), badge?: () => number }]
-export async function startApp(role, views) {
-  const me = await api('/api/me');
-  if (me.role !== role) { location.href = `/${me.role}`; return; }
-  document.title = `${me.college_name} ERP`;
+// views: [{ id, label, icon, group, render(main, ctx) }]; roles: who may open this page.
+export async function startApp(roles, views) {
+  let me;
+  try { me = await api('/api/me'); } catch { return; }
+  if (!roles.includes(me.role)) { location.href = me.role === 'teacher' ? '/teacher' : '/admin'; return; }
   const all = [...views, { id: 'password', label: 'Change password', icon: 'key', group: 'Account', render: passwordView(me) }];
-  const nav = h('nav', { class: 'sidenav', 'aria-label': 'Main' });
+  const nav = h('nav', { 'aria-label': 'Main' });
   const main = h('main', { class: 'main' });
-  const photo = me.profile?.photo;
-  const logout = async () => { await api('/api/logout', { method: 'POST' }).catch(() => {}); location.href = '/login'; };
-  document.getElementById('app').replaceChildren(
-    h('header', { class: 'topbar' },
-      h('button', { class: 'menu-btn icon-btn', 'aria-label': 'Menu', onclick: () => document.body.classList.toggle('nav-open') }, icon('menu')),
-      h('span', { class: 'logo', text: me.college_short || 'UU' }),
-      h('div', { class: 'brand-text' }, h('strong', { text: me.college_name }), h('span', { text: 'Campus ERP' })),
-      h('span', { class: 'spacer' }),
-      h('span', { class: 'session-pill', text: `Session ${me.academic_session}` }),
-      h('a', { class: 'btn icon-btn', href: '#notices', title: 'Notices', 'aria-label': 'Notices' }, icon('bell')),
-      h('div', { class: 'user-chip' }, avatar(me.name, photo), h('div', { class: 'who' }, h('strong', { text: me.name }), h('span', { text: me.profile?.roll_no ? `${role} · ${me.profile.roll_no}` : role })),
-        h('button', { class: 'icon-btn', title: 'Log out', 'aria-label': 'Log out', onclick: logout }, icon('logout')))),
-    h('div', { class: 'layout' }, nav, h('div', { class: 'scrim', onclick: () => document.body.classList.remove('nav-open') }), main));
+  const bell = notificationsBell();
+  const roleName = { super_admin: 'Super admin', admin: 'Administrator', teacher: me.profile?.designation || 'Faculty' }[me.role];
+  document.title = `${me.university_name} - ERP`;
+  document.getElementById('app').replaceChildren(h('div', { class: 'shell' },
+    h('aside', { class: 'sidebar' },
+      h('a', { class: 'brand', href: '#' }, h('img', { src: '/img/logo.png', alt: me.university_name })),
+      nav,
+      h('div', { class: 'me' }, h('span', { class: 'avatar', text: initials(me.name) }), h('div', null, h('strong', { text: me.name }), h('span', { text: roleName })))),
+    h('div', { class: 'scrim', onclick: () => document.body.classList.remove('nav-open') }),
+    h('div', { class: 'content' },
+      h('header', { class: 'topbar' },
+        h('button', { class: 'icon-btn menu-btn', 'aria-label': 'Menu', onclick: () => document.body.classList.toggle('nav-open') }, icon('menu')),
+        h('span', { class: 'date', text: new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) }),
+        h('span', { class: 'spacer' }), bell.el,
+        h('button', { class: 'sm', onclick: async () => { await api('/api/logout', { method: 'POST' }).catch(() => {}); location.href = '/login'; } }, icon('logout', 16), 'Log out')),
+      main)));
 
-  const ctx = { me, go: (id) => { location.hash = id; }, refreshNav: () => renderNav() };
+  const ctx = { me, go: (id) => { location.hash = id; }, refreshNotifications: bell.refresh };
   let current = all[0];
-  const badges = {};
-
   function renderNav() {
     const groups = [];
     for (const v of all) {
@@ -343,15 +272,11 @@ export async function startApp(role, views) {
       if (!g) groups.push(g = { name: v.group || '', items: [] });
       g.items.push(v);
     }
-    nav.replaceChildren(...groups.map((g) => h('div', { class: 'nav-group' }, g.name && h('div', { class: 'nav-group-title', text: g.name }),
-      g.items.map((v) => h('a', { href: `#${v.id}`, class: v.id === current.id ? 'active' : '', 'aria-current': v.id === current.id ? 'page' : null },
-        icon(v.icon || 'list'), h('span', { text: v.label }), badges[v.id] ? h('span', { class: 'count', text: badges[v.id] }) : null)))));
+    nav.replaceChildren(...groups.flatMap((g) => [g.name && h('div', { class: 'nav-title', text: g.name }),
+      ...g.items.map((v) => h('a', { href: `#${v.id}`, class: v.id === current.id ? 'active' : '', 'aria-current': v.id === current.id ? 'page' : null }, icon(v.icon || 'list'), h('span', { text: v.label })))]));
   }
 
-  // Counters next to menu items (pending leaves, open tickets, ...).
-  ctx.setBadge = (id, n) => { badges[id] = n || 0; renderNav(); };
-
-  let renderToken = 0;
+  let token = 0;
   async function route() {
     let id = location.hash.slice(1).split('/')[0] || all[0].id;
     if (me.must_change_pw) id = 'password';
@@ -360,17 +285,18 @@ export async function startApp(role, views) {
     renderNav();
     ctx.cleanup?.();
     ctx.cleanup = null;
-    const token = ++renderToken;
-    // Each visit renders into its own element, so a slow page that finishes after the
-    // user has moved on writes into a detached element instead of the new page.
-    const page = h('div', { class: 'page' }, h('div', { class: 'page-head' }, h('div', null,
-      h('div', { class: 'crumbs', text: [current.group, current.label].filter(Boolean).join(' / ') }), h('h1', { text: current.title || current.label }))));
+    const mine = ++token;
+    // A fresh element per visit: a slow page that finishes late writes into a detached node.
+    const page = h('div', null, h('div', { class: 'page-head' }, h('div', null,
+      h('div', { class: 'crumbs', text: [current.group, current.label].filter(Boolean).join(' / ') }), h('h1', { text: current.label }))));
     main.replaceChildren(page);
+    window.scrollTo(0, 0);
     try { await current.render(page, ctx); } catch (err) {
-      if (token === renderToken) page.append(h('div', { class: 'notice bad', text: err.message }));
+      if (mine === token) page.append(h('div', { class: 'notice bad', text: err.message }));
     }
+    hidePreloader();
   }
   window.addEventListener('hashchange', route);
-  route();
+  await route();
   return ctx;
 }

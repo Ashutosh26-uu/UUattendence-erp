@@ -1,6 +1,6 @@
 // List / create / update / delete for simple master tables.
-// `fields` maps column -> validator(value, body) so only whitelisted columns are written.
-const { one, all, run, audit } = require('./db');
+// `fields` maps column -> validator(value, body, req); only those columns are ever written.
+const { query, one, audit } = require('./db');
 const { HttpError, int } = require('./http');
 
 function readFields(fields, body, req) {
@@ -9,34 +9,37 @@ function readFields(fields, body, req) {
   return data;
 }
 
-function crud(router, { path, table, fields, listSql, label, afterValidate }) {
-  router.get(path, (req, res) => res.json(all(listSql)));
+function crud(router, { path, table, fields, listSql, label, afterChange, check }) {
+  router.get(path, async (req, res) => res.json(await query(listSql)));
 
-  router.post(path, (req, res) => {
+  router.post(path, async (req, res) => {
     const data = readFields(fields, req.body, req);
-    if (afterValidate) afterValidate(data);
+    if (check) check(data);
     const cols = Object.keys(data);
-    const r = run(`INSERT INTO ${table}(${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, ...cols.map((c) => data[c]));
-    audit(req.user.id, `${table}_created`, { id: Number(r.lastInsertRowid), ...data });
-    res.status(201).json({ id: Number(r.lastInsertRowid) });
+    const r = await one(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`, cols.map((c) => data[c]));
+    audit(req.user.id, `${table}_created`, { id: r.id, ...data });
+    afterChange?.(data);
+    res.status(201).json({ id: r.id });
   });
 
-  router.put(`${path}/:id`, (req, res) => {
+  router.put(`${path}/:id`, async (req, res) => {
     const id = int(req.params.id, 'Id', { required: true });
-    if (!one(`SELECT 1 FROM ${table} WHERE id = ?`, id)) throw new HttpError(404, `${label} not found`);
     const data = readFields(fields, req.body, req);
-    if (afterValidate) afterValidate(data);
+    if (check) check(data);
     const cols = Object.keys(data);
-    run(`UPDATE ${table} SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => data[c]), id);
+    const r = await one(`UPDATE ${table} SET ${cols.map((c, i) => `${c} = $${i + 2}`).join(', ')} WHERE id = $1 RETURNING id`, [id, ...cols.map((c) => data[c])]);
+    if (!r) throw new HttpError(404, `${label} not found`);
     audit(req.user.id, `${table}_updated`, { id, ...data });
+    afterChange?.(data);
     res.json({ ok: true });
   });
 
-  router.delete(`${path}/:id`, (req, res) => {
+  router.delete(`${path}/:id`, async (req, res) => {
     const id = int(req.params.id, 'Id', { required: true });
-    const r = run(`DELETE FROM ${table} WHERE id = ?`, id);
-    if (!r.changes) throw new HttpError(404, `${label} not found`);
+    const r = await one(`DELETE FROM ${table} WHERE id = $1 RETURNING id`, [id]);
+    if (!r) throw new HttpError(404, `${label} not found`);
     audit(req.user.id, `${table}_deleted`, { id });
+    afterChange?.({});
     res.json({ ok: true });
   });
 }

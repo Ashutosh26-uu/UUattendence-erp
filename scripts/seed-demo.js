@@ -1,159 +1,119 @@
-// Fills the database with a demo department, classes, teachers, students, timetable,
-// fees and a few weeks of past attendance. Run once: npm run seed:demo
-// Demo accounts share one password: DEMO_PASSWORD if set, otherwise a random one.
+// Demo data: departments, classes, rooms, faculty, students, a weekly timetable (including
+// today) and two weeks of past attendance. Run once: npm run seed:demo
+// All demo accounts share one password: DEMO_PASSWORD if set, otherwise a random one.
 const fs = require('node:fs');
 const path = require('node:path');
-const { one, run, tx, DATA_DIR } = require('../src/db');
-const { hashPassword, tempPassword } = require('../src/auth');
+const db = require('../src/db');
 
-const FIRST = ['Aman', 'Priya', 'Rahul', 'Sneha', 'Vikas', 'Neha', 'Arjun', 'Pooja', 'Rohit', 'Anjali', 'Karan', 'Divya'];
-const LAST = ['Sharma', 'Verma', 'Singh', 'Gupta', 'Yadav', 'Mishra', 'Rawat', 'Negi', 'Joshi', 'Bisht'];
+const FIRST = ['Aman', 'Priya', 'Rahul', 'Sneha', 'Vikas', 'Neha', 'Arjun', 'Pooja', 'Rohit', 'Anjali', 'Karan', 'Divya', 'Saurabh', 'Kavya', 'Aditya', 'Shreya', 'Manish', 'Ritika', 'Harsh', 'Nidhi'];
+const LAST = ['Sharma', 'Verma', 'Singh', 'Gupta', 'Yadav', 'Mishra', 'Tiwari', 'Pandey', 'Srivastava', 'Dubey', 'Shukla', 'Tripathi'];
 
-function seedDemo() {
-  if (one("SELECT 1 FROM departments WHERE code = 'CSE'")) {
-    console.log('Demo data already exists. Delete data/erp.db to start over.');
+async function seedDemo() {
+  await db.connect();
+  const auth = require('../src/auth');
+  if (await db.one("SELECT 1 FROM departments WHERE code = 'CSE'")) {
+    console.log('Demo data already exists. Delete the data folder to start over.');
     return false;
   }
+  const password = process.env.DEMO_PASSWORD || auth.tempPassword();
+  const hash = await auth.hashPassword(password);
 
-  const password = process.env.DEMO_PASSWORD || tempPassword();
-  const hash = hashPassword(password);
-  const id = (r) => Number(r.lastInsertRowid);
+  await db.tx(async (t) => {
+    const id = async (sql, p) => (await t.one(`${sql} RETURNING id`, p)).id;
+    const cse = await id("INSERT INTO departments (code, name) VALUES ('CSE', 'Computer Science and Engineering')");
+    const mgmt = await id("INSERT INTO departments (code, name) VALUES ('MGMT', 'School of Management')");
 
-  const logins = [];
-  tx(() => {
-    const dept = id(run("INSERT INTO departments(code, name) VALUES ('CSE', 'Computer Science and Engineering')"));
+    await t.query("INSERT INTO users (username, password_hash, role, name, must_change_pw) VALUES ('admin1', $1, 'admin', 'Office Admin', FALSE)", [hash]);
+
     const classes = [
-      id(run("INSERT INTO classes(name, department_id, semester, section, academic_year, room) VALUES ('BCA Sem 3 - A', ?, 3, 'A', '2026-27', 'LT-101')", dept)),
-      id(run("INSERT INTO classes(name, department_id, semester, section, academic_year, room) VALUES ('BCA Sem 3 - B', ?, 3, 'B', '2026-27', 'LT-102')", dept)),
+      [await id("INSERT INTO classes (name, department_id, program, semester, section, academic_year) VALUES ('BCA Sem 3 - A', $1, 'BCA', 3, 'A', '2026-27')", [cse]), 'BCA3A', 40],
+      [await id("INSERT INTO classes (name, department_id, program, semester, section, academic_year) VALUES ('BCA Sem 3 - B', $1, 'BCA', 3, 'B', '2026-27')", [cse]), 'BCA3B', 38],
+      [await id("INSERT INTO classes (name, department_id, program, semester, section, academic_year) VALUES ('MBA Sem 1 - A', $1, 'MBA', 1, 'A', '2026-27')", [mgmt]), 'MBA1A', 42],
     ];
-    const subjects = [
-      ['BCA301', 'Data Structures'], ['BCA302', 'Database Management Systems'], ['BCA303', 'Operating Systems'],
-    ].map(([code, name]) => id(run('INSERT INTO subjects(code, name, department_id, credits) VALUES (?, ?, ?, 4)', code, name, dept)));
-
-    const teachers = [['teacher1', 'Dr. Meera Kapoor', 'EMP001'], ['teacher2', 'Prof. Sanjay Rana', 'EMP002']].map(([u, name, emp]) => {
-      const t = id(run("INSERT INTO users(username, password_hash, role, name, must_change_pw) VALUES (?, ?, 'teacher', ?, 0)", u, hash, name));
-      run("INSERT INTO teachers(user_id, employee_no, department_id, designation) VALUES (?, ?, ?, 'Assistant Professor')", t, emp, dept);
-      logins.push(`teacher  ${u}`);
-      return t;
-    });
-
-    // teacher1: DS + DBMS in both classes, teacher2: OS in both classes
-    for (const c of classes) {
-      run('INSERT INTO assignments(teacher_id, class_id, subject_id) VALUES (?, ?, ?)', teachers[0], c, subjects[0]);
-      run('INSERT INTO assignments(teacher_id, class_id, subject_id) VALUES (?, ?, ?)', teachers[0], c, subjects[1]);
-      run('INSERT INTO assignments(teacher_id, class_id, subject_id) VALUES (?, ?, ?)', teachers[1], c, subjects[2]);
+    const rooms = [];
+    for (const [name, b] of [['LT-101', 'Academic Block A'], ['LT-102', 'Academic Block A'], ['LT-201', 'Academic Block B'], ['Lab-3', 'Academic Block A']]) {
+      rooms.push(await id('INSERT INTO rooms (name, building, capacity) VALUES ($1, $2, 60)', [name, b]));
+    }
+    const subj = {};
+    for (const [code, name, dep] of [['BCA301', 'Data Structures', cse], ['BCA302', 'Database Management Systems', cse], ['BCA303', 'Operating Systems', cse],
+      ['BCA304', 'Web Technologies', cse], ['MBA101', 'Principles of Management', mgmt], ['MBA102', 'Business Economics', mgmt], ['MBA103', 'Financial Accounting', mgmt]]) {
+      subj[code] = await id('INSERT INTO subjects (code, name, department_id) VALUES ($1, $2, $3)', [code, name, dep]);
+    }
+    const teachers = [];
+    for (const [u, name, emp, dep, des] of [['teacher1', 'Dr. Meera Kapoor', 'UU-EMP-101', cse, 'Associate Professor'], ['teacher2', 'Prof. Sanjay Rana', 'UU-EMP-102', cse, 'Assistant Professor'],
+      ['teacher3', 'Dr. Anita Joshi', 'UU-EMP-201', mgmt, 'Professor']]) {
+      const uid = await id("INSERT INTO users (username, password_hash, role, name, must_change_pw) VALUES ($1, $2, 'teacher', $3, FALSE)", [u, hash, name]);
+      await t.query('INSERT INTO teachers (user_id, employee_no, department_id, designation) VALUES ($1, $2, $3, $4)', [uid, emp, dep, des]);
+      teachers.push(uid);
     }
 
-    const studentsByClass = classes.map((c, ci) => Array.from({ length: 12 }, (_, i) => {
-      const roll = `BCA3${'AB'[ci]}${String(i + 1).padStart(2, '0')}`;
-      const name = `${FIRST[(i + ci * 5) % FIRST.length]} ${LAST[(i * 3 + ci) % LAST.length]}`;
-      const u = id(run("INSERT INTO users(username, password_hash, role, name, must_change_pw) VALUES (?, ?, 'student', ?, 0)", roll.toLowerCase(), hash, name));
-      run(`INSERT INTO students(user_id, roll_no, class_id, guardian_name, guardian_phone, dob, admission_year, blood_group, address)
-        VALUES (?, ?, ?, ?, ?, ?, 2025, ?, 'Dehradun, Uttarakhand')`, u, roll, c, `Mr. ${name.split(' ')[1]}`,
-      `98${String(37000000 + i * 1013 + ci * 7).padStart(8, '0')}`, `2006-${String((i % 12) + 1).padStart(2, '0')}-${String((i * 2) % 27 + 1).padStart(2, '0')}`,
-      ['A+', 'B+', 'O+', 'AB+', 'B-', 'O-'][i % 6]);
-      if (i === 0) logins.push(`student  ${roll.toLowerCase()}`);
-      return u;
-    }));
-
-    const slots = [['09:00', '10:00'], ['10:00', '11:00'], ['11:15', '12:15']];
-    for (const c of classes) {
-      for (let day = 1; day <= 5; day++) {
-        slots.forEach(([s, e], k) => run('INSERT INTO timetable(class_id, day, start_time, end_time, subject_id, room) VALUES (?, ?, ?, ?, ?, ?)',
-          c, day, s, e, subjects[(k + day) % 3], 'LT-10' + (classes.indexOf(c) + 1)));
-      }
-      run("INSERT INTO fee_structures(class_id, title, amount, due_date) VALUES (?, 'Tuition fee - Sem 3', 45000, '2026-08-31')", c);
-      run("INSERT INTO fee_structures(class_id, title, amount, due_date) VALUES (?, 'Exam fee - Sem 3', 2500, '2026-11-30')", c);
+    // Students, bulk inserted.
+    for (const [cid, prefix, n] of classes) {
+      const rolls = Array.from({ length: n }, (_, i) => `${prefix}${String(i + 1).padStart(2, '0')}`);
+      const names = rolls.map((_, i) => `${FIRST[(i * 7 + cid) % FIRST.length]} ${LAST[(i * 5 + cid * 3) % LAST.length]}`);
+      await t.query('INSERT INTO students (roll_no, name, class_id, phone) SELECT r, n, $3, $4 FROM unnest($1::text[], $2::text[]) AS x(r, n)', [rolls, names, cid, null]);
     }
 
-    // Three weeks of past (submitted) attendance so reports have data.
-    const start = new Date();
-    start.setDate(start.getDate() - 21);
-    for (let d = 0; d < 21; d++) {
-      const day = new Date(start);
-      day.setDate(start.getDate() + d);
-      if (day.getDay() === 0 || day.getDay() === 6) continue;
-      const date = day.toISOString().slice(0, 10);
-      classes.forEach((c, ci) => subjects.forEach((sub, si) => {
-        const teacher = si === 2 ? teachers[1] : teachers[0];
-        const list = studentsByClass[ci];
-        const s = id(run(`INSERT INTO attendance_sessions(class_id, subject_id, teacher_id, date, status, registered_count, last_faces, max_faces, captures, started_at, submitted_at)
-          VALUES (?, ?, ?, ?, 'submitted', ?, 0, 0, 1, ?, ?)`, c, sub, teacher, date, list.length, `${date} 09:00:00`, `${date} 09:10:00`));
-        let present = 0;
-        list.forEach((st, k) => {
-          const isPresent = (k * 7 + d * 3 + si) % 10 < (k % 4 === 3 ? 6 : 9);
-          if (isPresent) present++;
-          run('INSERT INTO attendance_marks(session_id, student_id, status, source, marked_at) VALUES (?, ?, ?, ?, ?)',
-            s, st, isPresent ? 'present' : 'absent', isPresent ? 'camera' : 'auto', `${date} 09:05:00`);
+    // Weekly timetable, Monday to Saturday, so every demo day has lectures (today included).
+    const plan = {
+      [classes[0][0]]: [['BCA301', 0, 0], ['BCA302', 0, 0], ['BCA303', 1, 0], ['BCA304', 1, 3]],
+      [classes[1][0]]: [['BCA302', 0, 1], ['BCA301', 0, 1], ['BCA304', 1, 3], ['BCA303', 1, 1]],
+      [classes[2][0]]: [['MBA101', 2, 2], ['MBA102', 2, 2], ['MBA103', 2, 2]],
+    };
+    const slots = [['09:00', '10:00'], ['10:10', '11:10'], ['11:20', '12:20'], ['13:00', '14:00']];
+    const lectures = [];
+    for (let day = 1; day <= 6; day++) {
+      for (const [cid, list] of Object.entries(plan)) {
+        // Rotate subjects across the day so each weekday looks different; avoid clashes per teacher/room.
+        list.forEach(([code, tIdx, rIdx], k) => {
+          const slot = (k + day + Number(cid)) % slots.length;
+          lectures.push({ cid: Number(cid), code, teacher: teachers[tIdx], room: rooms[rIdx], day, slot });
         });
-        run('UPDATE attendance_sessions SET last_faces = ?, max_faces = ? WHERE id = ?', present, present, s);
-      }));
+      }
+    }
+    // Drop any lecture that would clash with an earlier one for the same teacher or room.
+    const busy = new Set();
+    for (const l of lectures) {
+      let slot = l.slot;
+      for (let tries = 0; tries < slots.length; tries++, slot = (slot + 1) % slots.length) {
+        const keys = [`t${l.teacher}:${l.day}:${slot}`, `r${l.room}:${l.day}:${slot}`, `c${l.cid}:${l.day}:${slot}`];
+        if (keys.every((k) => !busy.has(k))) { keys.forEach((k) => busy.add(k)); l.slot = slot; l.ok = true; break; }
+      }
+      if (l.ok) {
+        l.id = await id('INSERT INTO lectures (teacher_id, class_id, subject_id, room_id, day, start_time, end_time) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+          [l.teacher, l.cid, subj[l.code], l.room, l.day, slots[l.slot][0], slots[l.slot][1]]);
+      }
     }
 
-    // Previous semester (Sem 2) result, published, so grade cards and CGPA have data.
-    const sem2 = [['BCA201', 'Object Oriented Programming'], ['BCA202', 'Discrete Mathematics'], ['BCA203', 'Computer Networks']]
-      .map(([code, name]) => id(run('INSERT INTO subjects(code, name, department_id, credits) VALUES (?, ?, ?, 4)', code, name, dept)));
-    classes.forEach((c, ci) => {
-      studentsByClass[ci].forEach((st, k) => sem2.forEach((sub, si) => {
-        const internal = 22 + ((k * 5 + si * 3) % 17);
-        const external = k % 11 === 7 && si === 1 ? 18 : 28 + ((k * 7 + si * 11) % 31);
-        run('INSERT INTO result_entries(student_id, subject_id, semester, class_id, internal, external) VALUES (?, ?, 2, ?, ?, ?)', st, sub, c, internal, external);
-      }));
-      run('INSERT INTO result_publish(class_id, semester) VALUES (?, 2)', c);
-      // Current semester: internals entered by teachers, externals pending.
-      studentsByClass[ci].forEach((st, k) => subjects.forEach((sub, si) => run(
-        'INSERT INTO result_entries(student_id, subject_id, semester, class_id, internal) VALUES (?, ?, 3, ?, ?)', st, sub, c, 24 + ((k * 3 + si * 5) % 15))));
-    });
-
-    // Assignments, some already submitted and graded.
-    const isoDay = (offset) => new Date(Date.now() + offset * 864e5).toISOString().slice(0, 10);
-    classes.forEach((c, ci) => {
-      const hw1 = id(run(`INSERT INTO homework(class_id, subject_id, teacher_id, title, description, due_date, max_marks)
-        VALUES (?, ?, ?, 'Linked list programs', 'Write C programs for insertion and deletion in a singly linked list.', ?, 10)`, c, subjects[0], teachers[0], isoDay(-5)));
-      run(`INSERT INTO homework(class_id, subject_id, teacher_id, title, description, due_date, max_marks)
-        VALUES (?, ?, ?, 'ER diagram for a library', 'Draw an ER diagram for a college library system and convert it to tables.', ?, 20)`, c, subjects[1], teachers[0], isoDay(4));
-      run(`INSERT INTO homework(class_id, subject_id, teacher_id, title, description, due_date, max_marks)
-        VALUES (?, ?, ?, 'CPU scheduling numericals', 'Solve the 5 FCFS / SJF / Round Robin questions from unit 2.', ?, 10)`, c, subjects[2], teachers[1], isoDay(7));
-      studentsByClass[ci].slice(0, 8).forEach((st, k) => run(`INSERT INTO homework_submissions(homework_id, student_id, answer, submitted_at, marks, feedback)
-        VALUES (?, ?, 'Programs attached in the answer below.', ?, ?, ?)`, hw1, st, `${isoDay(-6)} 18:00:00`, k < 5 ? 6 + (k % 5) : null, k < 5 ? 'Good work' : null));
-    });
-
-    // Library
-    const books = [['LIB0001', 'Data Structures Using C', 'Reema Thareja', 'Computer Science', 5], ['LIB0002', 'Database System Concepts', 'Silberschatz, Korth', 'Computer Science', 4],
-      ['LIB0003', 'Operating System Concepts', 'Silberschatz, Galvin', 'Computer Science', 4], ['LIB0004', 'Let Us C', 'Yashavant Kanetkar', 'Programming', 6],
-      ['LIB0005', 'Computer Networks', 'Andrew Tanenbaum', 'Computer Science', 3], ['LIB0006', 'Discrete Mathematics', 'Kenneth Rosen', 'Mathematics', 3],
-      ['LIB0007', 'Wings of Fire', 'A. P. J. Abdul Kalam', 'General', 2], ['LIB0008', 'Introduction to Algorithms', 'Cormen et al.', 'Computer Science', 2]]
-      .map(([acc, title, author, cat, copies], i) => id(run('INSERT INTO books(accession_no, title, author, category, copies, shelf) VALUES (?, ?, ?, ?, ?, ?)', acc, title, author, cat, copies, `R${1 + (i % 4)}`)));
-    run('INSERT INTO book_issues(book_id, user_id, issued_on, due_on) VALUES (?, ?, ?, ?)', books[0], studentsByClass[0][0], isoDay(-20), isoDay(-6));
-    run('INSERT INTO book_issues(book_id, user_id, issued_on, due_on) VALUES (?, ?, ?, ?)', books[3], studentsByClass[0][0], isoDay(-3), isoDay(11));
-    run('INSERT INTO book_issues(book_id, user_id, issued_on, due_on) VALUES (?, ?, ?, ?)', books[1], studentsByClass[1][2], isoDay(-10), isoDay(4));
-
-    // Hostel and transport
-    const boys = id(run("INSERT INTO hostels(name, type, warden_name, warden_phone) VALUES ('Aryabhatta Hostel', 'boys', 'Mr. R. K. Negi', '9837011111')"));
-    const girls = id(run("INSERT INTO hostels(name, type, warden_name, warden_phone) VALUES ('Gargi Hostel', 'girls', 'Mrs. S. Bisht', '9837022222')"));
-    const rooms = [boys, girls].map((h) => [101, 102, 103, 104].map((no) => id(run('INSERT INTO hostel_rooms(hostel_id, room_no, capacity) VALUES (?, ?, 3)', h, String(no)))));
-    studentsByClass[0].slice(0, 6).forEach((st, k) => run('INSERT INTO hostel_allotments(student_id, room_id) VALUES (?, ?)', st, rooms[k % 2][Math.floor(k / 2) % 4]));
-    const r1 = id(run("INSERT INTO bus_routes(name, bus_no, driver_name, driver_phone, departure_time, stops) VALUES ('Route 1 - ISBT', 'UK07 PA 1234', 'Ramesh Kumar', '9837033333', '07:30', 'ISBT, Clock Tower, Rajpur Road, Campus')"));
-    const r2 = id(run("INSERT INTO bus_routes(name, bus_no, driver_name, driver_phone, departure_time, stops) VALUES ('Route 2 - Prem Nagar', 'UK07 PA 5678', 'Suresh Rawat', '9837044444', '07:45', 'Prem Nagar, Ballupur, Kaulagarh, Campus')"));
-    studentsByClass[0].slice(6, 10).forEach((st, k) => run('INSERT INTO transport_allotments(student_id, route_id, stop) VALUES (?, ?, ?)', st, k % 2 ? r2 : r1, k % 2 ? 'Ballupur' : 'Clock Tower'));
-
-    // Leave, feedback, grievance
-    run("INSERT INTO leave_requests(student_id, from_date, to_date, leave_type, reason) VALUES (?, ?, ?, 'medical', 'Viral fever, doctor advised rest.')", studentsByClass[0][1], isoDay(1), isoDay(3));
-    run("INSERT INTO leave_requests(student_id, from_date, to_date, leave_type, reason, status, reviewed_by, reviewed_at) VALUES (?, ?, ?, 'family', 'Sister''s wedding', 'approved', ?, datetime('now'))", studentsByClass[0][0], isoDay(-12), isoDay(-11), teachers[0]);
-    studentsByClass.flat().slice(2, 16).forEach((st, k) => subjects.forEach((sub, si) => run(`INSERT INTO feedback(student_id, teacher_id, subject_id, cycle, q1, q2, q3, q4, q5, comment)
-      VALUES (?, ?, ?, '2026-27 Odd Sem', ?, ?, ?, ?, ?, ?)`, st, si === 2 ? teachers[1] : teachers[0], sub, 3 + ((k + si) % 3), 4 + (k % 2), 3 + ((k * si) % 3), 4, 3 + ((k + 1) % 3),
-    k === 3 && si === 0 ? 'Please share more practice questions before tests.' : null)));
-    run("INSERT INTO grievances(user_id, category, subject, description) VALUES (?, 'infrastructure', 'Projector not working in LT-101', 'The projector in LT-101 has not worked for a week, so slides cannot be shown.')", studentsByClass[0][3]);
-
-    const admin = one("SELECT id FROM users WHERE role = 'admin'");
-    run("INSERT INTO notices(title, body, audience, created_by) VALUES ('Camera attendance starts this week', 'Attendance in all BCA classes is now taken by the classroom camera. Students without a face photo should meet their class teacher.', 'all', ?)", admin?.id ?? null);
+    // Two weeks of saved attendance before today.
+    const studentsBy = new Map();
+    for (const [cid] of classes) studentsBy.set(cid, (await t.query('SELECT id FROM students WHERE class_id = $1 ORDER BY roll_no', [cid])).map((r) => r.id));
+    const todayIso = new Date();
+    for (let back = 14; back >= 1; back--) {
+      const d = new Date(todayIso.getFullYear(), todayIso.getMonth(), todayIso.getDate() - back);
+      const dow = d.getDay() === 0 ? 7 : d.getDay();
+      const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      for (const l of lectures.filter((x) => x.ok && x.day === dow)) {
+        const ids = studentsBy.get(l.cid);
+        const status = ids.map((_, k) => ((k * 7 + back * 3 + l.slot) % 10 < (k % 6 === 5 ? 6 : 9) ? 'P' : 'A'));
+        const source = status.map((s, k) => (s === 'P' ? (k % 9 === 4 ? 'manual' : 'camera') : 'auto'));
+        const present = status.filter((s) => s === 'P').length;
+        const sid = await id(`INSERT INTO attendance_sessions (lecture_id, class_id, subject_id, teacher_id, room_id, date, status, registered_count, max_faces,
+          recognised_count, present_count, frames, started_at, scan_ends_at, submitted_at, saved_at)
+          VALUES ($1, $2, $3, $4, $5, $6, 'saved', $7, $8, $9, $8, 100, $10::timestamptz, $10::timestamptz + interval '5 minutes', $10::timestamptz + interval '7 minutes', $10::timestamptz + interval '7 minutes')`,
+        [l.id, l.cid, subj[l.code], l.teacher, l.room, date, ids.length, present, source.filter((s) => s === 'camera').length, `${date}T${slots[l.slot][0]}:00+05:30`]);
+        await t.query(`INSERT INTO attendance_records (session_id, student_id, status, source, confidence)
+          SELECT $1, * FROM unnest($2::int[], $3::text[], $4::text[], $5::real[])`,
+        [sid, ids, status, source, source.map((s, k) => (s === 'camera' ? 0.55 + ((k * 13) % 40) / 100 : null))]);
+      }
+    }
   });
 
-  const file = path.join(DATA_DIR, 'demo-logins.txt');
-  fs.writeFileSync(file, `Demo accounts (all use the same password): ${password}\n\n${logins.join('\n')}\n(all students: bca3a01..bca3a12, bca3b01..bca3b12)\n\nAdmin login: see initial-admin.txt\n`);
+  const file = path.join(db.DATA_DIR, 'demo-logins.txt');
+  fs.writeFileSync(file, `Demo accounts (all use the same password): ${password}\n\nadmin     admin1\nteacher   teacher1, teacher2, teacher3 (or employee no UU-EMP-101 ...)\n\nSuper admin: see initial-super-admin.txt\n`);
   console.log(`Demo data added. Logins saved in ${file}`);
   return true;
 }
 
 module.exports = { seedDemo };
-if (require.main === module) seedDemo();
+if (require.main === module) seedDemo().then(() => process.exit(0), (err) => { console.error(err); process.exit(1); });

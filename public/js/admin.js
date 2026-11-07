@@ -1,261 +1,253 @@
 import {
-  h, api, toast, busy, confirmBox, showSecret, table, buildForm, selectEl, startApp, crudView,
-  fmtDate, fmtDateTime, money, pctBadge, DAYS, statCard, cardTitle, donut, bars, columns,
+  h, api, toast, busy, confirmBox, showSecret, table, buildForm, selectEl, startApp, icon, statCard, cardTitle, bars, columns,
+  DAYS, fmtDate, fmtDateTime, fmtTime, pctKind,
 } from './common.js';
-import { enrollView } from './enroll.js';
-import { leaveReview, resultsSheet, feedbackSummary } from './modules.js';
-import { resultsAdmin, library, hostel, transport, grievances, idCards } from './admin-campus.js';
 
-const options = async (url, label) => (await api(url)).map((r) => ({ value: r.id, label: label(r) }));
-const deptOptions = () => options('/api/admin/departments', (d) => `${d.code} - ${d.name}`);
-const classOptions = () => options('/api/admin/classes', (c) => c.name);
-const subjectOptions = () => options('/api/admin/subjects', (s) => `${s.code} - ${s.name}`);
+const opts = async (url, label) => (await api(url)).map((r) => ({ value: r.id, label: label(r) }));
+const deptOptions = () => opts('/api/admin/departments', (d) => `${d.code} - ${d.name}`);
+const classOptions = () => opts('/api/admin/classes', (c) => c.name);
 const dayOptions = DAYS.slice(1).map((d, i) => ({ value: i + 1, label: d }));
+
+// Generic list + add/edit form.
+function crudView({ endpoint, cols, fields, intro, onCreated, rowActions, canDelete = true, toValues }) {
+  return async (main) => {
+    const fieldList = await fields();
+    const formCard = h('div', { class: 'card hidden' });
+    const listCard = h('div', { class: 'card' });
+    main.querySelector('.page-head').append(h('button', { class: 'primary', onclick: () => openForm(null) }, icon('upload', 16), 'Add new'));
+    if (intro) main.append(h('p', { class: 'muted', text: intro }));
+    main.append(formCard, listCard);
+    function openForm(row) {
+      formCard.replaceChildren(h('h2', { text: row ? 'Edit' : 'Add new' }), buildForm(fieldList.filter((f) => !(row && f.createOnly)), {
+        values: row ? (toValues ? toValues(row) : row) : {},
+        submitLabel: row ? 'Save changes' : 'Add',
+        onCancel: () => formCard.classList.add('hidden'),
+        onSubmit: async (d) => {
+          if (row) { await api(`${endpoint}/${row.id}`, { method: 'PUT', body: d }); toast('Saved', 'ok'); } else {
+            const r = await api(endpoint, { method: 'POST', body: d });
+            toast('Added', 'ok');
+            if (onCreated) await onCreated(r, d);
+          }
+          formCard.classList.add('hidden');
+          await load();
+        },
+      }));
+      formCard.classList.remove('hidden');
+      formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    async function load() {
+      listCard.replaceChildren(table([...cols, {
+        label: '', class: 'actions', render: (r) => h('span', { class: 'row end' }, h('button', { class: 'sm', text: 'Edit', onclick: () => openForm(r) }), rowActions?.(r, load),
+          canDelete && h('button', { class: 'sm danger', text: 'Delete', onclick: busy(async () => { if (!await confirmBox('Delete this record?', { ok: 'Delete', danger: true })) return; await api(`${endpoint}/${r.id}`, { method: 'DELETE' }); toast('Deleted'); await load(); }) })),
+      }], await api(endpoint)));
+    }
+    await load();
+  };
+}
 
 function userActions(r, reload) {
   return [
-    h('button', {
-      class: 'sm', text: 'Reset password', onclick: busy(async () => {
-        if (!await confirmBox(`Give ${r.name} a new one-time password?`, { ok: 'Reset' })) return;
-        const out = await api(`/api/admin/users/${r.id}/reset-password`, { method: 'POST' });
-        await showSecret('New password', `One-time password for ${r.username}:`, out.temp_password);
-      }),
-    }),
-    h('button', {
-      class: `sm ${r.active ? 'danger' : 'ok'}`, text: r.active ? 'Deactivate' : 'Activate', onclick: busy(async () => {
-        if (!await confirmBox(r.active ? `Deactivate ${r.name}? They will not be able to log in.` : `Activate ${r.name}?`, { ok: r.active ? 'Deactivate' : 'Activate', danger: !!r.active })) return;
-        await api(`/api/admin/users/${r.id}/active`, { method: 'POST', body: { active: !r.active } });
-        await reload();
-      }),
-    }),
+    h('button', { class: 'sm', text: 'Reset password', onclick: busy(async () => {
+      if (!await confirmBox(`Give ${r.name} a new one-time password?`, { ok: 'Reset' })) return;
+      const out = await api(`/api/admin/users/${r.id}/reset-password`, { method: 'POST' });
+      await showSecret('New password', `One-time password for ${r.username}:`, out.temp_password);
+    }) }),
+    h('button', { class: `sm ${r.active ? 'danger' : 'ok'}`, text: r.active ? 'Deactivate' : 'Activate', onclick: busy(async () => {
+      if (!await confirmBox(r.active ? `Deactivate ${r.name}? They will be logged out and cannot log in.` : `Activate ${r.name}?`, { ok: r.active ? 'Deactivate' : 'Activate', danger: !!r.active })) return;
+      await api(`/api/admin/users/${r.id}/active`, { method: 'POST', body: { active: !r.active } });
+      await reload();
+    }) }),
   ];
 }
-
 const activeBadge = (r) => h('span', { class: `badge ${r.active ? 'ok' : 'bad'}`, text: r.active ? 'Active' : 'Inactive' });
-const showCreatedLogin = (r, d) => showSecret('Account created', `Login for ${d.username}:`, r.temp_password);
 
-// ---- Views ----
-async function dashboard(main, ctx) {
+// ---- Dashboard ----
+async function dashboard(main) {
   const s = await api('/api/admin/stats');
-  ctx.setBadge('leave', s.pending_leaves);
-  ctx.setBadge('grievances', s.open_grievances);
-  const feePct = s.fees_total ? (s.fees_collected / s.fees_total) * 100 : null;
+  const t = s.today;
   main.append(h('div', { class: 'stats' },
-    statCard('students', 'Students', s.students, `${s.face_enrolled} face enrolled`),
-    statCard('teacher', 'Faculty', s.teachers, `${s.subjects} subjects`),
-    statCard('building', 'Classes', s.classes),
-    statCard('scan', 'Attendance today', s.sessions_today, `${s.sessions_open} in progress`, 'ok'),
-    statCard('wallet', 'Fees collected', money(s.fees_collected), `of ${money(s.fees_total)}`, 'ok'),
-    statCard('calendar', 'Leave requests', s.pending_leaves, 'pending', s.pending_leaves ? 'warn' : ''),
-    statCard('alert', 'Grievances', s.open_grievances, 'open', s.open_grievances ? 'bad' : ''),
-    statCard('library', 'Books issued', s.books_issued, `${s.hostel_residents} in hostel · ${s.bus_riders} on bus`)));
-
+    statCard('students', 'Students', s.students.toLocaleString('en-IN'), `${s.enrolled.toLocaleString('en-IN')} face enrolled`),
+    statCard('teacher', 'Faculty', s.teachers, `${s.lectures} lectures / week`),
+    statCard('building', 'Classes', s.classes, `${s.rooms} rooms · ${s.cameras} cameras`),
+    statCard('checkbox', 'Attendance today', t.saved, `${t.live} in progress · ${t.queued} queued`, 'ok'),
+    statCard('usercheck', 'Present today', t.registered ? `${Math.round((t.present / t.registered) * 100)}%` : '-', `${t.present} of ${t.registered}`, 'red')));
+  if (s.enrolled < s.students) main.append(h('div', { class: 'notice warn' }, `${s.students - s.enrolled} students have no face photo yet, so the camera cannot recognise them. `, h('a', { href: '#faces', text: 'Enrol faces' })));
   main.append(h('div', { class: 'grid-2-1' },
-    h('div', { class: 'card' }, cardTitle('chart', 'Daily attendance (last 14 class days)'),
-      columns(s.attendance_trend.map((d) => {
-        const p = d.total ? Math.round((d.present / d.total) * 100) : 0;
-        return { label: new Date(`${d.date}T00:00:00`).toLocaleDateString('en', { day: '2-digit', month: 'short' }), value: p, text: `${p}%` };
-      }))),
-    h('div', { class: 'card' }, cardTitle('wallet', 'Fee collection'),
-      h('div', { class: 'donut-wrap' }, donut(feePct, 'collected', 'ok'),
-        h('div', { class: 'legend' }, h('div', null, h('span', { class: 'dot c2' }), `Collected ${money(s.fees_collected)}`),
-          h('div', null, h('span', { class: 'dot track' }), `Due ${money(Math.max(0, s.fees_total - s.fees_collected))}`))))));
-
-  main.append(h('div', { class: 'grid2' },
-    h('div', { class: 'card' }, cardTitle('building', 'Class-wise attendance'),
-      bars(s.class_attendance.map((c) => ({ label: c.name, value: c.present || 0, max: c.total || 0, text: c.total ? `${Math.round((c.present / c.total) * 100)}%` : '-' })), { pctKind: true })),
-    h('div', { class: 'card' }, cardTitle('list', 'Quick actions'), h('div', { class: 'row' },
-      [['students', 'Add student'], ['fees', 'Collect fee'], ['results', 'Results'], ['leave', 'Leave requests'], ['library', 'Issue book'], ['notices', 'Post notice'], ['id-cards', 'Print ID cards']]
-        .map(([id, label]) => h('a', { class: 'btn', href: `#${id}`, text: label }))))));
+    h('div', { class: 'card' }, cardTitle('chart', 'Daily attendance %'), columns(s.trend.map((d) => ({ label: fmtDate(d.date).slice(0, 6), value: d.registered ? Math.round((d.present / d.registered) * 100) : 0 })))),
+    h('div', { class: 'card' }, cardTitle('building', 'Class-wise attendance'), bars(s.class_attendance.map((c) => ({ label: c.name, value: c.present, max: c.registered }))))));
 }
+
+// ---- Master data ----
 const departments = crudView({
   endpoint: '/api/admin/departments',
   fields: async () => [{ name: 'code', label: 'Code', required: true }, { name: 'name', label: 'Name', required: true }],
-  columns: [{ label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }],
+  cols: [{ label: 'Code', key: 'code' }, { label: 'Department', key: 'name' }],
 });
 
 const classes = crudView({
   endpoint: '/api/admin/classes',
-  intro: 'Camera URL: the JPEG snapshot address of the classroom IP camera, e.g. http://user:pass@192.168.1.50/cgi-bin/snapshot.jpg. Leave empty if teachers use a laptop / USB camera.',
   fields: async () => [
     { name: 'name', label: 'Class name', required: true, placeholder: 'BCA Sem 3 - A' },
     { name: 'department_id', label: 'Department', type: 'select', required: true, options: await deptOptions() },
-    { name: 'semester', label: 'Semester', type: 'number', min: 1, max: 12 },
-    { name: 'section', label: 'Section' },
-    { name: 'academic_year', label: 'Academic year', placeholder: '2026-27' },
-    { name: 'room', label: 'Room' },
-    { name: 'camera_url', label: 'Classroom camera URL', full: true, placeholder: 'http://192.168.1.50/snapshot.jpg' },
+    { name: 'program', label: 'Program', placeholder: 'BCA' }, { name: 'semester', label: 'Semester', type: 'number', min: 1, max: 12 },
+    { name: 'section', label: 'Section' }, { name: 'academic_year', label: 'Academic year', placeholder: '2026-27' },
   ],
-  columns: [
-    { label: 'Class', key: 'name' }, { label: 'Department', key: 'department_name' }, { label: 'Sem', key: 'semester' },
-    { label: 'Year', key: 'academic_year' }, { label: 'Room', key: 'room' }, { label: 'Students', key: 'student_count', class: 'num' },
-    { label: 'Camera', render: (c) => h('span', { class: `badge ${c.camera_url ? 'ok' : ''}`, text: c.camera_url ? 'IP camera' : 'None' }) },
-  ],
+  cols: [{ label: 'Class', key: 'name' }, { label: 'Department', key: 'department_name' }, { label: 'Program', key: 'program' }, { label: 'Sem', key: 'semester' },
+    { label: 'Students', class: 'num', key: 'students' },
+    { label: 'Face enrolled', render: (c) => h('span', { class: `badge ${c.enrolled >= c.students && c.students ? 'ok' : 'warn'}`, text: `${c.enrolled} / ${c.students}` }) }],
+});
+
+const rooms = crudView({
+  endpoint: '/api/admin/rooms',
+  intro: 'Camera URL = the JPEG snapshot address of the IP camera in the room, e.g. http://user:pass@10.0.5.21/cgi-bin/snapshot.cgi. The server fetches it, so the camera password never reaches teachers. Leave empty if the room uses a laptop / USB camera.',
+  fields: async () => [{ name: 'name', label: 'Room', required: true, placeholder: 'LT-101' }, { name: 'building', label: 'Building' },
+    { name: 'capacity', label: 'Capacity', type: 'number', min: 1 }, { name: 'camera_url', label: 'Camera snapshot URL', full: true }],
+  cols: [{ label: 'Room', key: 'name' }, { label: 'Building', key: 'building' }, { label: 'Capacity', class: 'num', key: 'capacity' },
+    { label: 'Camera', render: (r) => h('span', { class: `badge ${r.camera_url ? 'ok' : ''}`, text: r.camera_url ? 'IP camera' : 'None' }) }],
 });
 
 const subjects = crudView({
   endpoint: '/api/admin/subjects',
-  fields: async () => [
-    { name: 'code', label: 'Code', required: true }, { name: 'name', label: 'Name', required: true },
-    { name: 'department_id', label: 'Department', type: 'select', options: await deptOptions() },
-    { name: 'credits', label: 'Credits', type: 'number', min: 0, max: 20 },
-  ],
-  columns: [{ label: 'Code', key: 'code' }, { label: 'Name', key: 'name' }, { label: 'Department', key: 'department_name' }, { label: 'Credits', key: 'credits', class: 'num' }],
+  fields: async () => [{ name: 'code', label: 'Code', required: true }, { name: 'name', label: 'Subject', required: true }, { name: 'department_id', label: 'Department', type: 'select', options: await deptOptions() }],
+  cols: [{ label: 'Code', key: 'code' }, { label: 'Subject', key: 'name' }, { label: 'Department', key: 'department_name' }],
 });
 
-const teachers = crudView({
+const faculty = crudView({
   endpoint: '/api/admin/teachers',
   canDelete: false,
   fields: async () => [
-    { name: 'name', label: 'Full name', required: true },
-    { name: 'employee_no', label: 'Employee no', required: true },
-    { name: 'username', label: 'Username', required: true },
-    { name: 'password', label: 'Password', type: 'password', createOnly: true, hint: 'Leave empty to generate a one-time password' },
-    { name: 'department_id', label: 'Department', type: 'select', options: await deptOptions() },
-    { name: 'designation', label: 'Designation' },
+    { name: 'name', label: 'Full name', required: true }, { name: 'employee_no', label: 'Employee ID', required: true, hint: 'Teachers can log in with this' },
+    { name: 'username', label: 'Username', required: true }, { name: 'password', label: 'Password', type: 'password', createOnly: true, hint: 'Leave empty to generate a one-time password' },
+    { name: 'department_id', label: 'Department', type: 'select', options: await deptOptions() }, { name: 'designation', label: 'Designation' },
     { name: 'email', label: 'Email', type: 'email' }, { name: 'phone', label: 'Phone' },
   ],
-  onCreated: showCreatedLogin,
+  onCreated: (r, d) => showSecret('Teacher account created', `Login for ${d.employee_no} / ${d.username}:`, r.temp_password),
   rowActions: userActions,
-  columns: [
-    { label: 'Name', key: 'name' }, { label: 'Emp no', key: 'employee_no' }, { label: 'Username', key: 'username' },
-    { label: 'Department', key: 'department_name' }, { label: 'Subjects', key: 'subject_count', class: 'num' }, { label: 'Status', render: activeBadge },
-  ],
+  cols: [{ label: 'Name', key: 'name' }, { label: 'Employee ID', key: 'employee_no' }, { label: 'Department', key: 'department_name' }, { label: 'Designation', key: 'designation' },
+    { label: 'Lectures/week', class: 'num', key: 'lectures' }, { label: 'Status', render: activeBadge }],
 });
 
-const studentFields = async () => [
-  { name: 'name', label: 'Full name', required: true },
-  { name: 'roll_no', label: 'Roll no', required: true },
-  { name: 'class_id', label: 'Class', type: 'select', required: true, options: await classOptions() },
-  { name: 'username', label: 'Username', required: true },
-  { name: 'password', label: 'Password', type: 'password', createOnly: true, hint: 'Leave empty to generate a one-time password' },
-  { name: 'email', label: 'Email', type: 'email' }, { name: 'phone', label: 'Phone' },
-  { name: 'guardian_name', label: 'Guardian name' }, { name: 'guardian_phone', label: 'Guardian phone' },
-  { name: 'dob', label: 'Date of birth', type: 'date' }, { name: 'admission_year', label: 'Admission year', type: 'number' },
-  { name: 'blood_group', label: 'Blood group', type: 'select', options: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((b) => ({ value: b, label: b })) },
-  { name: 'address', label: 'Address', type: 'textarea', full: true },
-];
-
-// Paste many students at once: one per line "roll_no, name, username".
-function importButton(reload) {
-  return h('button', {
-    text: 'Import list', onclick: async () => {
-      const cls = await classOptions();
-      const out = h('div');
-      const form = buildForm([
-        { name: 'class_id', label: 'Class', type: 'select', required: true, options: cls },
-        { name: 'lines', label: 'One student per line: roll_no, name, username (username optional, roll no is used)', type: 'textarea', required: true, full: true, placeholder: 'BCA301, Aman Verma, aman301\nBCA302, Priya Singh' },
-      ], {
-        submitLabel: 'Import',
-        onSubmit: async (d) => {
-          const results = [];
-          for (const line of String(d.lines).split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
-            const [roll, name, username] = line.split(',').map((x) => x.trim());
-            try {
-              const r = await api('/api/admin/students', { method: 'POST', body: { class_id: d.class_id, roll_no: roll, name, username: username || roll } });
-              results.push({ roll, name, username: username || roll, password: r.temp_password, ok: true });
-            } catch (err) {
-              results.push({ roll, name, username: username || roll, password: err.message, ok: false });
-            }
-          }
-          const csvText = ['roll_no,name,username,one_time_password', ...results.filter((r) => r.ok).map((r) => [r.roll, r.name, r.username, r.password].join(','))].join('\n');
-          const url = URL.createObjectURL(new Blob([csvText], { type: 'text/csv' }));
-          out.replaceChildren(h('div', { class: 'between' }, h('h2', { text: `Imported ${results.filter((r) => r.ok).length} of ${results.length}` }),
-            h('a', { class: 'btn primary', href: url, download: 'student-logins.csv', text: 'Download logins (CSV)' })),
-          table([{ label: 'Roll', key: 'roll' }, { label: 'Name', key: 'name' }, { label: 'Username', key: 'username' },
-            { label: 'One-time password / error', render: (r) => h('span', { class: r.ok ? 'secret small' : 'badge bad', text: r.password }) }], results));
-          await reload();
-        },
-      });
-      const card = h('div', { class: 'card' }, h('h2', { text: 'Import students' }), form, out);
-      document.querySelector('.main .page-head').after(card);
-    },
-  });
-}
-
-const students = crudView({
-  endpoint: '/api/admin/students',
-  canDelete: false,
-  filter: { param: 'classId', placeholder: 'All classes', options: classOptions },
-  fields: studentFields,
-  extra: importButton,
-  onCreated: showCreatedLogin,
-  rowActions: userActions,
-  columns: [
-    { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' }, { label: 'Class', key: 'class_name' }, { label: 'Username', key: 'username' },
-    { label: 'Face', render: (s) => h('span', { class: `badge ${s.face_samples ? 'ok' : 'warn'}`, text: s.face_samples ? `${s.face_samples} photo(s)` : 'Not enrolled' }) },
-    { label: 'Status', render: activeBadge },
-  ],
-});
-
-async function assignments(main) {
-  const [tOpts, cOpts, sOpts] = await Promise.all([
-    options('/api/admin/teachers', (t) => `${t.name} (${t.employee_no})`), classOptions(), subjectOptions()]);
+// ---- Students: paginated, search, CSV import ----
+async function students(main) {
+  const classOpts = await classOptions();
+  let page = 1;
+  const classSel = selectEl(classOpts, { placeholder: 'All classes', onchange: () => { page = 1; load(); } });
+  const q = h('input', { type: 'search', placeholder: 'Search name or roll no', 'aria-label': 'Search students' });
+  let timer;
+  q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { page = 1; load(); }, 300); });
+  const formCard = h('div', { class: 'card hidden' });
+  const importCard = h('div', { class: 'card hidden' });
   const listCard = h('div', { class: 'card' });
-  main.append(h('p', { class: 'muted', text: 'Each class + subject has one teacher. Only that teacher can take attendance and enter marks for it.' }),
-    h('div', { class: 'card' }, h('h2', { text: 'Assign a subject' }), buildForm([
-      { name: 'class_id', label: 'Class', type: 'select', required: true, options: cOpts },
-      { name: 'subject_id', label: 'Subject', type: 'select', required: true, options: sOpts },
-      { name: 'teacher_id', label: 'Teacher', type: 'select', required: true, options: tOpts },
-    ], { submitLabel: 'Assign', onSubmit: async (d) => { await api('/api/admin/assignments', { method: 'POST', body: d }); toast('Assigned'); await load(); } })),
-    listCard);
+  main.querySelector('.page-head').append(h('div', { class: 'row' },
+    h('button', { onclick: () => { importCard.classList.toggle('hidden'); } }, icon('upload', 16), 'Import CSV'),
+    h('button', { class: 'primary', onclick: () => openForm(null) }, 'Add student')));
+  main.append(importCard, formCard, h('div', { class: 'row' }, classSel, q), h('br'), listCard);
+
+  const fields = [
+    { name: 'roll_no', label: 'Roll no / enrolment no', required: true }, { name: 'name', label: 'Full name', required: true },
+    { name: 'class_id', label: 'Class', type: 'select', required: true, options: classOpts },
+    { name: 'phone', label: 'Phone' }, { name: 'email', label: 'Email', type: 'email' }, { name: 'guardian_phone', label: 'Guardian phone' },
+  ];
+  function openForm(row) {
+    formCard.replaceChildren(h('h2', { text: row ? 'Edit student' : 'Add student' }), buildForm(row ? [...fields, { name: 'active', label: 'Status', type: 'select', required: true, options: [{ value: 'true', label: 'Active' }, { value: 'false', label: 'Left / inactive' }] }] : fields, {
+      values: row ? { ...row, active: String(row.active) } : { class_id: classSel.value },
+      submitLabel: row ? 'Save' : 'Add',
+      onCancel: () => formCard.classList.add('hidden'),
+      onSubmit: async (d) => {
+        if (row) await api(`/api/admin/students/${row.id}`, { method: 'PUT', body: d }); else await api('/api/admin/students', { method: 'POST', body: d });
+        toast('Saved', 'ok');
+        formCard.classList.add('hidden');
+        await load();
+      },
+    }));
+    formCard.classList.remove('hidden');
+  }
+
+  const file = h('input', { type: 'file', accept: '.csv,text/csv', 'aria-label': 'CSV file' });
+  const out = h('div');
+  importCard.append(cardTitle('upload', 'Import students from CSV'),
+    h('p', { class: 'muted small', text: 'Columns (first row = headings): roll_no, name, class, phone, email, guardian_phone. "class" is the class name exactly as on the Classes page. Thousands of rows are fine.' }),
+    h('div', { class: 'row' }, file, h('button', { class: 'primary', onclick: busy(async () => {
+      const f = file.files[0];
+      if (!f) throw new Error('Choose a CSV file');
+      const rows = parseCsv(await f.text());
+      if (!rows.length) throw new Error('No rows found');
+      let added = 0;
+      const errors = [];
+      for (let i = 0; i < rows.length; i += 1000) {
+        const r = await api('/api/admin/students/import', { method: 'POST', body: { rows: rows.slice(i, i + 1000) } });
+        added += r.added;
+        errors.push(...r.errors.map((e) => ({ ...e, line: e.line ? e.line + i + 1 : '' })));
+      }
+      out.replaceChildren(h('div', { class: `notice ${errors.length ? 'warn' : 'ok'}`, text: `Added ${added} of ${rows.length} students.${errors.length ? ` ${errors.length} skipped:` : ''}` }),
+        errors.length ? table([{ label: 'Line', key: 'line' }, { label: 'Roll no', key: 'roll_no' }, { label: 'Problem', key: 'error' }], errors.slice(0, 200)) : null);
+      await load();
+    }) }, 'Import')), out);
+
   async function load() {
-    listCard.replaceChildren(table([
-      { label: 'Class', key: 'class_name' }, { label: 'Subject', render: (a) => `${a.subject_code} ${a.subject_name}` }, { label: 'Teacher', key: 'teacher_name' },
-      { label: '', class: 'actions', render: (a) => h('button', { class: 'sm danger', text: 'Remove', onclick: busy(async () => { await api(`/api/admin/assignments/${a.id}`, { method: 'DELETE' }); await load(); }) }) },
-    ], await api('/api/admin/assignments'), 'No subjects assigned yet.'));
+    const p = new URLSearchParams({ page });
+    if (classSel.value) p.set('classId', classSel.value);
+    if (q.value.trim()) p.set('q', q.value.trim());
+    const d = await api(`/api/admin/students?${p}`);
+    listCard.replaceChildren(h('div', { class: 'muted small', text: `${d.total.toLocaleString('en-IN')} students` }), table([
+      { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' }, { label: 'Class', key: 'class_name' }, { label: 'Phone', key: 'phone' },
+      { label: 'Face', render: (s) => h('span', { class: `badge ${s.faces ? 'ok' : 'warn'}`, text: s.faces ? `${s.faces} photo(s)` : 'Not enrolled' }) },
+      { label: 'Status', render: (s) => h('span', { class: `badge ${s.active ? 'ok' : 'bad'}`, text: s.active ? 'Active' : 'Inactive' }) },
+      { label: '', class: 'actions', render: (s) => h('button', { class: 'sm', text: 'Edit', onclick: () => openForm(s) }) },
+    ], d.rows, 'No students found.'),
+    h('div', { class: 'pager' }, h('span', { class: 'small muted', text: `Page ${d.page} of ${d.pages}` }),
+      h('button', { class: 'sm', text: 'Previous', disabled: d.page <= 1, onclick: () => { page--; load(); } }),
+      h('button', { class: 'sm', text: 'Next', disabled: d.page >= d.pages, onclick: () => { page++; load(); } })));
   }
   await load();
 }
 
-const timetable = crudView({
-  endpoint: '/api/admin/timetable',
-  fields: async () => [
-    { name: 'class_id', label: 'Class', type: 'select', required: true, options: await classOptions() },
-    { name: 'day', label: 'Day', type: 'select', required: true, options: dayOptions },
-    { name: 'start_time', label: 'Start', type: 'time', required: true }, { name: 'end_time', label: 'End', type: 'time', required: true },
-    { name: 'subject_id', label: 'Subject', type: 'select', required: true, options: await subjectOptions() },
-    { name: 'room', label: 'Room' },
-  ],
-  columns: [
-    { label: 'Class', key: 'class_name' }, { label: 'Day', render: (t) => DAYS[t.day] }, { label: 'Time', render: (t) => `${t.start_time} - ${t.end_time}` },
-    { label: 'Subject', render: (t) => `${t.subject_code} ${t.subject_name}` }, { label: 'Room', key: 'room' },
-  ],
-});
+function parseCsv(text) {
+  const lines = [];
+  let row = [''];
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { row[row.length - 1] += '"'; i++; } else if (ch === '"') quoted = false; else row[row.length - 1] += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') row.push('');
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; lines.push(row); row = ['']; } else row[row.length - 1] += ch;
+  }
+  lines.push(row);
+  const clean = lines.filter((r) => r.some((c) => c.trim()));
+  if (!clean.length) return [];
+  const head = clean[0].map((c) => c.trim().toLowerCase().replace(/^﻿/, '').replace(/\s+/g, '_'));
+  return clean.slice(1).map((r) => Object.fromEntries(head.map((k, i) => [k, (r[i] || '').trim()])));
+}
 
-const feeHeads = crudView({
-  endpoint: '/api/admin/fee-structures',
-  intro: 'Fee heads per class (tuition, exam fee, ...). Every student of the class owes each head.',
-  fields: async () => [
-    { name: 'class_id', label: 'Class', type: 'select', required: true, options: await classOptions() },
-    { name: 'title', label: 'Title', required: true, placeholder: 'Tuition fee - Sem 3' },
-    { name: 'amount', label: 'Amount (Rs)', type: 'number', required: true, min: 0, step: '0.01' },
-    { name: 'due_date', label: 'Due date', type: 'date' },
-  ],
-  columns: [{ label: 'Class', key: 'class_name' }, { label: 'Title', key: 'title' }, { label: 'Amount', class: 'num', render: (f) => money(f.amount) }, { label: 'Due', render: (f) => fmtDate(f.due_date) }],
-});
-
-async function feeCollection(main) {
-  const cOpts = await classOptions();
+// ---- Timetable (lecture allotment) ----
+async function timetable(main) {
+  const [teachers, classOpts, subjects, rooms] = await Promise.all([
+    opts('/api/admin/teachers', (t) => `${t.name} (${t.employee_no})`), classOptions(),
+    opts('/api/admin/subjects', (s) => `${s.code} - ${s.name}`), opts('/api/admin/rooms', (r) => `${r.name}${r.camera_url ? ' (camera)' : ''}`)]);
   const formCard = h('div', { class: 'card hidden' });
-  const duesCard = h('div', { class: 'card' });
-  const payCard = h('div', { class: 'card' });
-  const classSel = selectEl(cOpts, { placeholder: 'All classes', onchange: () => load() });
-  main.append(h('div', { class: 'row' }, h('strong', { text: 'Class' }), classSel), h('br'), formCard, duesCard, payCard);
-
-  async function record(st) {
-    const heads = (await api('/api/admin/fee-structures')).filter((f) => f.class_name === st.class_name);
-    formCard.replaceChildren(h('h2', { text: `Record payment: ${st.name} (${st.roll_no})` }), h('p', { class: 'muted', text: `Due: ${money(st.due)}` }), buildForm([
-      { name: 'fee_id', label: 'Fee', type: 'select', required: true, options: heads.map((f) => ({ value: f.id, label: `${f.title} (${money(f.amount)})` })) },
-      { name: 'amount', label: 'Amount (Rs)', type: 'number', required: true, min: 0.01, step: '0.01' },
-      { name: 'paid_on', label: 'Paid on', type: 'date', default: new Date().toISOString().slice(0, 10) },
-      { name: 'mode', label: 'Mode', type: 'select', required: true, default: 'cash', options: ['cash', 'upi', 'card', 'bank', 'cheque'].map((m) => ({ value: m, label: m.toUpperCase() })) },
+  const listCard = h('div', { class: 'card' });
+  const classSel = selectEl(classOpts, { placeholder: 'All classes', onchange: () => load() });
+  const teacherSel = selectEl(teachers, { placeholder: 'All teachers', onchange: () => load() });
+  main.querySelector('.page-head').append(h('button', { class: 'primary', onclick: () => openForm(null) }, 'Allot lecture'));
+  main.append(h('p', { class: 'muted', text: 'Teachers see these lectures on their dashboard and start attendance from them. Clashes (same teacher, class or room at the same time) are refused.' }),
+    formCard, h('div', { class: 'row' }, classSel, teacherSel), h('br'), listCard);
+  function openForm(row) {
+    formCard.replaceChildren(h('h2', { text: row ? 'Edit lecture' : 'Allot a lecture' }), buildForm([
+      { name: 'teacher_id', label: 'Teacher', type: 'select', required: true, options: teachers },
+      { name: 'class_id', label: 'Class', type: 'select', required: true, options: classOpts },
+      { name: 'subject_id', label: 'Subject', type: 'select', required: true, options: subjects },
+      { name: 'room_id', label: 'Room', type: 'select', options: rooms },
+      { name: 'day', label: 'Day', type: 'select', required: true, options: dayOptions },
+      { name: 'start_time', label: 'Start', type: 'time', required: true }, { name: 'end_time', label: 'End', type: 'time', required: true },
     ], {
-      submitLabel: 'Save payment',
+      values: row || { class_id: classSel.value, teacher_id: teacherSel.value },
+      submitLabel: row ? 'Save' : 'Allot',
       onCancel: () => formCard.classList.add('hidden'),
       onSubmit: async (d) => {
-        const r = await api('/api/admin/fees/payments', { method: 'POST', body: { ...d, student_id: st.id } });
-        toast(`Payment saved. Receipt ${r.receipt_no}`);
+        if (row) await api(`/api/admin/lectures/${row.id}`, { method: 'PUT', body: d }); else await api('/api/admin/lectures', { method: 'POST', body: d });
+        toast('Saved', 'ok');
         formCard.classList.add('hidden');
         await load();
       },
@@ -263,150 +255,257 @@ async function feeCollection(main) {
     formCard.classList.remove('hidden');
     formCard.scrollIntoView({ behavior: 'smooth' });
   }
-
   async function load() {
-    const q = classSel.value ? `?classId=${classSel.value}` : '';
-    const dues = await api(`/api/admin/fees/dues${q}`);
-    duesCard.replaceChildren(h('h2', { text: 'Student dues' }), table([
-      { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' }, { label: 'Class', key: 'class_name' },
-      { label: 'Total', class: 'num', render: (r) => money(r.total) }, { label: 'Paid', class: 'num', render: (r) => money(r.paid) },
-      { label: 'Due', class: 'num', render: (r) => h('span', { class: `badge ${r.due > 0 ? 'warn' : 'ok'}`, text: money(r.due) }) },
-      { label: '', class: 'actions', render: (r) => r.due > 0 && h('button', { class: 'sm primary', text: 'Record payment', onclick: busy(() => record(r)) }) },
-    ], dues, 'No students.'));
-    const pays = await api('/api/admin/fees/payments');
-    payCard.replaceChildren(h('h2', { text: 'Recent payments' }), table([
-      { label: 'Receipt', key: 'receipt_no' }, { label: 'Date', render: (p) => fmtDate(p.paid_on) }, { label: 'Student', render: (p) => `${p.student_name} (${p.roll_no})` },
-      { label: 'Fee', key: 'fee_title' }, { label: 'Mode', render: (p) => (p.mode || '').toUpperCase() }, { label: 'Amount', class: 'num', render: (p) => money(p.amount) },
-      { label: 'By', key: 'recorded_by_name' },
-    ], pays.slice(0, 50), 'No payments yet.'));
+    const p = new URLSearchParams();
+    if (classSel.value) p.set('classId', classSel.value);
+    if (teacherSel.value) p.set('teacherId', teacherSel.value);
+    listCard.replaceChildren(table([
+      { label: 'Day', render: (l) => h('strong', { text: DAYS[l.day] }) }, { label: 'Time', render: (l) => `${l.start_time} - ${l.end_time}` },
+      { label: 'Class', key: 'class_name' }, { label: 'Subject', render: (l) => `${l.subject_code} ${l.subject_name}` }, { label: 'Teacher', key: 'teacher_name' }, { label: 'Room', key: 'room_name' },
+      { label: '', class: 'actions', render: (l) => h('span', { class: 'row end' }, h('button', { class: 'sm', text: 'Edit', onclick: () => openForm(l) }),
+        h('button', { class: 'sm danger', text: 'Delete', onclick: busy(async () => { if (!await confirmBox('Delete this lecture?', { ok: 'Delete', danger: true })) return; await api(`/api/admin/lectures/${l.id}`, { method: 'DELETE' }); await load(); }) })) },
+    ], await api(`/api/admin/lectures?${p}`), 'No lectures allotted yet.'));
   }
   await load();
 }
 
-async function attendance(main) {
-  const cOpts = await classOptions();
-  const reportCard = h('div', { class: 'card' });
-  const sessCard = h('div', { class: 'card' });
-  const detailCard = h('div', { class: 'card hidden' });
-  const classSel = selectEl(cOpts, { placeholder: 'Choose a class', onchange: () => load() });
-  main.append(h('div', { class: 'row' }, h('strong', { text: 'Class' }), classSel), h('br'), detailCard, reportCard, sessCard);
+// ---- Face enrolment ----
+async function faces(main, ctx) {
+  const cam = await import('./camera.js');
+  const classOpts = await classOptions();
+  const classSel = selectEl(classOpts, { placeholder: 'Choose a class', onchange: () => loadClass() });
+  const listCard = h('div', { class: 'card' });
+  const bulkOut = h('div');
+  const bar = h('div');
+  const progress = h('div', { class: 'progress hidden' }, bar);
+  const files = h('input', { type: 'file', accept: 'image/*', multiple: true, 'aria-label': 'Student photos' });
 
-  async function showSession(id) {
-    const d = await api(`/api/admin/attendance/sessions/${id}`);
-    const s = d.session;
-    detailCard.replaceChildren(h('div', { class: 'between' }, h('h2', { text: `Attendance on ${fmtDate(s.date)} (${s.status})` }),
-      h('button', { class: 'sm', text: 'Close', onclick: () => detailCard.classList.add('hidden') })),
-    h('p', { class: 'muted', text: `Registered ${s.registered_count} · counted by camera ${s.max_faces ?? '-'} · ${s.captures} capture(s)` }),
-    table([
-      { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' },
-      { label: 'Status', render: (m) => h('span', { class: `badge ${m.status === 'present' ? 'ok' : 'bad'}`, text: m.status }) },
-      { label: 'How', key: 'source' }, { label: 'Marked', render: (m) => fmtDateTime(m.marked_at) },
-      s.status === 'submitted' && {
-        label: 'Correct', class: 'actions', render: (m) => h('button', {
-          class: 'sm', text: m.status === 'present' ? 'Make absent' : 'Make present', onclick: busy(async () => {
-            const to = m.status === 'present' ? 'absent' : 'present';
-            if (!await confirmBox(`Change ${m.name} to ${to}? This is recorded in the audit log.`, { ok: 'Change' })) return;
-            await api(`/api/admin/attendance/sessions/${id}/marks`, { method: 'PUT', body: { student_id: m.student_id, status: to } });
-            await showSession(id);
-            await load();
-          }),
-        }),
-      },
-    ].filter(Boolean), d.marks, 'No marks.'));
-    detailCard.classList.remove('hidden');
-    detailCard.scrollIntoView({ behavior: 'smooth' });
+  main.append(h('div', { class: 'grid2' },
+    h('div', { class: 'card' }, cardTitle('upload', 'Bulk upload (fastest for a whole batch)'),
+      h('p', { class: 'muted small', text: 'Select many photos at once. Name every file with the student\'s roll number, e.g. BCA3A01.jpg. One clear front-facing face per photo. Detection runs in this browser.' }),
+      h('div', { class: 'row' }, files, h('button', { class: 'primary', onclick: busy(bulk) }, 'Enrol photos')), progress, bulkOut),
+    h('div', { class: 'card' }, cardTitle('camera', 'Capture with a camera'),
+      h('p', { class: 'muted small', text: 'Choose a class below, then capture a group photo or one student; pick the name under each face.' }),
+      h('div', { id: 'capture' }, h('div', { class: 'empty', text: 'Choose a class first.' })))),
+  h('div', { class: 'row' }, h('strong', { text: 'Class' }), classSel), h('br'), listCard);
+
+  async function bulk() {
+    const list = [...files.files];
+    if (!list.length) throw new Error('Choose photos first');
+    progress.classList.remove('hidden');
+    const results = [];
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      const roll = f.name.replace(/\.[^.]+$/, '').trim();
+      try {
+        const canvas = await cam.fileToCanvas(f);
+        const found = await cam.detectFaces(canvas, ctx.me.min_face_confidence);
+        if (!found.length) throw new Error('No face found');
+        const face = found.sort((a, b) => b.box.width * b.box.height - a.box.width * a.box.height)[0];
+        await api('/api/admin/faces/by-roll', { method: 'POST', body: { roll_no: roll, descriptor: face.descriptor, photo: cam.cropFace(canvas, face.box) } });
+        results.push({ roll, ok: true, note: found.length > 1 ? `Saved the largest of ${found.length} faces` : 'Saved' });
+      } catch (err) { results.push({ roll, ok: false, note: err.message }); }
+      bar.style.width = `${((i + 1) / list.length) * 100}%`;
+    }
+    const good = results.filter((r) => r.ok).length;
+    bulkOut.replaceChildren(h('div', { class: `notice ${good === results.length ? 'ok' : 'warn'}`, text: `Enrolled ${good} of ${results.length} photos.` }),
+      table([{ label: 'Roll no', key: 'roll' }, { label: 'Result', render: (r) => h('span', { class: `badge ${r.ok ? 'ok' : 'bad'}`, text: r.note }) }], results.filter((r) => !r.ok).concat(results.filter((r) => r.ok)).slice(0, 300)));
+    if (classSel.value) await loadClass();
   }
 
-  async function load() {
-    const classId = classSel.value;
-    if (classId) {
-      const r = await api(`/api/admin/reports/attendance?classId=${classId}`);
-      reportCard.replaceChildren(h('div', { class: 'between' }, h('h2', { text: `Attendance report: ${r.class.name}` }),
-        h('a', { class: 'btn', href: `/api/admin/reports/attendance?classId=${classId}&format=csv`, text: 'Download CSV' })),
+  let panel = null;
+  ctx.cleanup = () => panel?.stop();
+  async function loadClass() {
+    panel?.stop();
+    const box = main.querySelector('#capture');
+    if (!classSel.value) { box.replaceChildren(h('div', { class: 'empty', text: 'Choose a class first.' })); listCard.replaceChildren(); return; }
+    let roster = await api(`/api/admin/faces/class/${classSel.value}`);
+    panel = cam.cameraPanel({ allowUpload: true });
+    const faceGrid = h('div', { class: 'face-grid' });
+    box.replaceChildren(panel.el, h('br'), h('button', { class: 'red', onclick: busy(async () => {
+      const frame = await panel.grab();
+      const found = await cam.detectFaces(frame, ctx.me.min_face_confidence);
+      panel.setStatus(found.length ? `Found ${found.length} face(s). Choose the name under each and save.` : 'No face found. Move closer or improve the light.');
+      faceGrid.replaceChildren(...found.map((f) => {
+        const photo = cam.cropFace(frame, f.box);
+        const sel = selectEl(roster.map((s) => ({ value: s.id, label: `${s.roll_no} - ${s.name}${s.samples.length ? ` (${s.samples.length})` : ''}` })), { placeholder: 'Who is this?' });
+        const card = h('div', { class: 'face-card' }, h('img', { src: photo, alt: '' }), sel);
+        card.append(h('button', { class: 'primary sm', text: 'Save', onclick: busy(async (e) => {
+          if (!sel.value) throw new Error('Choose the student');
+          const body = { descriptor: f.descriptor, photo };
+          try { await api(`/api/admin/faces/student/${sel.value}`, { method: 'POST', body }); } catch (err) {
+            if (err.status !== 409 || !await confirmBox(`${err.message}\n\nSave anyway?`, { ok: 'Save anyway', danger: true })) throw err.status === 409 ? new Error('Not saved') : err;
+            await api(`/api/admin/faces/student/${sel.value}`, { method: 'POST', body: { ...body, force: true } });
+          }
+          card.classList.add('saved');
+          e.target.replaceWith(h('span', { class: 'badge ok', text: 'Saved' }));
+          roster = await api(`/api/admin/faces/class/${classSel.value}`);
+          renderRoster();
+        }) }));
+        return card;
+      }));
+    }) }, icon('camera', 16), 'Capture and find faces'), h('br'), h('br'), faceGrid);
+    function renderRoster() {
+      const done = roster.filter((s) => s.samples.length).length;
+      listCard.replaceChildren(cardTitle('users', `Enrolled ${done} of ${roster.length}`), table([
+        { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' },
+        { label: 'Photos', render: (s) => (s.samples.length ? h('div', { class: 'thumbs' }, s.samples.map((p) => h('div', { class: 'thumb' }, h('img', { src: p.photo || '', alt: '' }),
+          h('button', { class: 'danger', text: 'x', 'aria-label': `Delete photo of ${s.name}`, onclick: busy(async () => { if (!await confirmBox(`Delete this photo of ${s.name}?`, { ok: 'Delete', danger: true })) return; await api(`/api/admin/faces/${p.id}`, { method: 'DELETE' }); roster = await api(`/api/admin/faces/class/${classSel.value}`); renderRoster(); }) }))))
+          : h('span', { class: 'badge warn', text: 'Not enrolled' })) },
+      ], roster, 'No students in this class.'));
+    }
+    renderRoster();
+  }
+}
+
+// ---- Attendance records ----
+async function records(main) {
+  const classSel = selectEl(await classOptions(), { placeholder: 'All classes', onchange: () => load() });
+  const dateIn = h('input', { type: 'date', 'aria-label': 'Date' });
+  dateIn.addEventListener('change', () => load());
+  const detail = h('div', { class: 'card hidden' });
+  const listCard = h('div', { class: 'card' });
+  main.append(h('div', { class: 'row' }, classSel, dateIn), h('br'), detail, listCard);
+  const sBadge = (s) => h('span', { class: `badge ${{ saved: 'ok', queued: 'navy', scanning: 'red', review: 'warn' }[s] || ''}`, text: s });
+  async function open(id) {
+    const d = await api(`/api/admin/sessions/${id}`);
+    const s = d.session;
+    detail.replaceChildren(cardTitle('checkbox', `${s.class_name} · ${s.subject_code} · ${fmtDate(s.date)}`, h('button', { class: 'sm', text: 'Close', onclick: () => detail.classList.add('hidden') })),
+      h('p', { class: 'muted', text: `Teacher ${s.teacher_name} · registered ${s.registered_count} · camera count ${s.max_faces} · recognised ${s.recognised_count} · present ${s.present_count ?? '-'}` }),
       table([
         { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' },
-        ...r.subjects.map((sub) => ({ label: sub.code, class: 'num', render: (st) => (st.bySubject[sub.id] ? `${st.bySubject[sub.id].present}/${st.bySubject[sub.id].total}` : '-') })),
-        { label: 'Overall', render: (st) => pctBadge(st.pct) },
-      ], r.students, 'No students in this class.'));
-    } else {
-      reportCard.replaceChildren(h('div', { class: 'empty', text: 'Choose a class to see its attendance report.' }));
-    }
-    const sessions = await api(`/api/admin/attendance/sessions${classId ? `?classId=${classId}` : ''}`);
-    sessCard.replaceChildren(h('h2', { text: 'Attendance sessions' }), table([
-      { label: 'Date', render: (s) => fmtDate(s.date) }, { label: 'Class', key: 'class_name' }, { label: 'Subject', render: (s) => `${s.subject_code} ${s.subject_name}` },
-      { label: 'Teacher', key: 'teacher_name' },
-      { label: 'Present', class: 'num', render: (s) => `${s.present}/${s.registered_count}` },
-      { label: 'By camera', class: 'num', key: 'by_camera' }, { label: 'Camera count', class: 'num', render: (s) => s.max_faces ?? '-' },
-      { label: 'Status', render: (s) => h('span', { class: `badge ${s.status === 'submitted' ? 'ok' : s.status === 'open' ? 'warn' : ''}`, text: s.status }) },
-      { label: '', class: 'actions', render: (s) => h('button', { class: 'sm', text: 'View', onclick: busy(() => showSession(s.id)) }) },
-    ], sessions, 'No attendance taken yet.'));
+        { label: 'Status', render: (r) => h('span', { class: `badge ${r.status === 'P' ? 'ok' : 'bad'}`, text: r.status === 'P' ? 'Present' : 'Absent' }) },
+        { label: 'Marked by', render: (r) => ({ camera: `Camera (${Math.round((r.confidence || 0) * 100)}%)`, manual: 'Hand', auto: 'Not seen' }[r.source]) },
+        { label: 'Correct', class: 'actions', render: (r) => h('button', { class: 'sm', text: r.status === 'P' ? 'Make absent' : 'Make present', onclick: busy(async () => {
+          const to = r.status === 'P' ? 'A' : 'P';
+          if (!await confirmBox(`Change ${r.name} to ${to === 'P' ? 'present' : 'absent'}? This is written to the audit log.`, { ok: 'Change' })) return;
+          await api(`/api/admin/sessions/${id}/records/${r.student_id}`, { method: 'PUT', body: { status: to } });
+          await open(id);
+          await load();
+        }) }) },
+      ], d.records, s.status === 'saved' ? 'No records.' : `Not saved yet (status: ${s.status}).`));
+    detail.classList.remove('hidden');
+    detail.scrollIntoView({ behavior: 'smooth' });
+  }
+  async function load() {
+    const p = new URLSearchParams();
+    if (classSel.value) p.set('classId', classSel.value);
+    if (dateIn.value) p.set('date', dateIn.value);
+    listCard.replaceChildren(table([
+      { label: 'Date', render: (s) => fmtDate(s.date) }, { label: 'Started', render: (s) => fmtTime(s.started_at) }, { label: 'Class', key: 'class_name' },
+      { label: 'Subject', key: 'subject_code' }, { label: 'Teacher', key: 'teacher_name' }, { label: 'Room', key: 'room_name' },
+      { label: 'Registered', class: 'num', key: 'registered_count' }, { label: 'Camera count', class: 'num', key: 'max_faces' },
+      { label: 'Present', class: 'num', render: (s) => s.present_count ?? '-' }, { label: 'Status', render: (s) => sBadge(s.status) },
+      { label: '', class: 'actions', render: (s) => h('button', { class: 'sm', text: 'View', onclick: busy(() => open(s.id)) }) },
+    ], await api(`/api/admin/sessions?${p}`), 'No attendance found.'));
   }
   await load();
 }
 
-const notices = crudView({
-  endpoint: '/api/admin/notices',
-  fields: async () => [
-    { name: 'title', label: 'Title', required: true },
-    { name: 'audience', label: 'Show to', type: 'select', required: true, default: 'all', options: [{ value: 'all', label: 'Everyone' }, { value: 'teacher', label: 'Teachers' }, { value: 'student', label: 'Students' }] },
-    { name: 'body', label: 'Message', type: 'textarea', required: true, full: true },
-  ],
-  columns: [{ label: 'Date', render: (n) => fmtDate(n.created_at) }, { label: 'Title', key: 'title' }, { label: 'For', key: 'audience' }, { label: 'By', key: 'author' }],
+async function reports(main) {
+  const box = h('div');
+  const classSel = selectEl(await classOptions(), { placeholder: 'Choose a class', onchange: () => load() });
+  const from = h('input', { type: 'date', 'aria-label': 'From' });
+  const to = h('input', { type: 'date', 'aria-label': 'To' });
+  from.addEventListener('change', () => load());
+  to.addEventListener('change', () => load());
+  main.append(h('div', { class: 'row' }, classSel, h('span', { class: 'muted', text: 'From' }), from, h('span', { class: 'muted', text: 'To' }), to), h('br'), box);
+  async function load() {
+    if (!classSel.value) return box.replaceChildren(h('div', { class: 'card empty', text: 'Choose a class.' }));
+    const p = new URLSearchParams();
+    if (from.value) p.set('from', from.value);
+    if (to.value) p.set('to', to.value);
+    const d = await api(`/api/admin/reports/class/${classSel.value}?${p}`);
+    const low = d.students.filter((s) => s.pct != null && s.pct < 75);
+    box.replaceChildren(h('div', { class: 'card' }, cardTitle('chart', `${d.class.name} attendance`, h('a', { class: 'btn', href: `/api/admin/reports/class/${classSel.value}?${p}&format=csv` }, icon('download', 16), 'Download CSV')),
+      low.length ? h('div', { class: 'notice warn', text: `${low.length} student(s) below 75% attendance.` }) : null,
+      table([
+        { label: 'Roll no', key: 'roll_no' }, { label: 'Name', key: 'name' }, { label: 'Present', class: 'num', render: (s) => `${s.present} / ${s.total}` },
+        { label: '%', render: (s) => h('span', { class: `badge ${({ ok: 'ok', warn: 'warn', bad: 'bad' })[pctKind(s.pct)] || ''}`, text: s.pct == null ? '-' : `${s.pct}%` }) },
+      ], d.students, 'No students.')));
+  }
+  await load();
+}
+
+// ---- Super admin ----
+async function monitor(main, ctx) {
+  const box = h('div');
+  main.querySelector('.page-head').append(h('button', { class: 'primary', onclick: busy(async () => { await api('/api/super/queue/drain', { method: 'POST' }); toast('Queue processed', 'ok'); await load(); }) }, icon('queue', 16), 'Save queued attendance now'));
+  main.append(h('p', { class: 'muted', text: 'Refreshes every 5 seconds. When more than the threshold of attendance submissions arrive in one minute, new ones are queued and saved when traffic drops (the gap between lectures); anything waiting longer than the deadline is saved anyway.' }), box);
+  async function load() {
+    const m = await api('/api/super/monitor');
+    const q = m.queue;
+    const peak = q.traffic_per_minute > q.threshold;
+    box.replaceChildren(
+      h('div', { class: 'stats' },
+        statCard('activity', 'Submissions / minute', q.traffic_per_minute, `queue starts above ${q.threshold}`, peak ? 'red' : 'ok'),
+        statCard('queue', 'Waiting in queue', q.pending, q.oldest_seconds ? `oldest ${Math.round(q.oldest_seconds / 60)} min` : 'empty', q.pending ? 'warn' : 'ok'),
+        statCard('scan', 'Live scans', m.today.scanning, `${m.live_scans_in_memory} in memory`, 'red'),
+        statCard('checkbox', 'Saved today', m.today.saved, `${m.today.review} waiting for teacher`, 'ok')),
+      h('div', { class: 'grid2' },
+        h('div', { class: 'card' }, cardTitle('queue', 'Write path'), h('dl', { class: 'kv' },
+          h('dt', { text: 'Mode now' }), h('dd', { text: peak ? 'Peak: new submissions are queued' : 'Normal: saved directly' }),
+          h('dt', { text: 'Saved directly' }), h('dd', { text: q.direct }), h('dt', { text: 'Queued' }), h('dd', { text: q.queued }),
+          h('dt', { text: 'Saved from queue' }), h('dd', { text: q.drained }), h('dt', { text: 'Failed (retrying)' }), h('dd', { text: q.failed }),
+          h('dt', { text: 'Last queue run' }), h('dd', { text: q.lastDrainAt ? fmtDateTime(q.lastDrainAt) : '-' }))),
+        h('div', { class: 'card' }, cardTitle('settings', 'System'), h('dl', { class: 'kv' },
+          h('dt', { text: 'Database' }), h('dd', { text: m.database }), h('dt', { text: 'Users' }), h('dd', { text: m.totals.users }),
+          h('dt', { text: 'Students' }), h('dd', { text: m.totals.students.toLocaleString('en-IN') }), h('dt', { text: 'Attendance records' }), h('dd', { text: m.totals.records.toLocaleString('en-IN') }),
+          h('dt', { text: 'Server memory' }), h('dd', { text: `${m.server.memory_mb} MB` }), h('dt', { text: 'Uptime' }), h('dd', { text: `${m.server.uptime_minutes} min` })))));
+  }
+  await load();
+  const t = setInterval(() => load().catch(() => {}), 5000);
+  ctx.cleanup = () => clearInterval(t);
+}
+
+const admins = crudView({
+  endpoint: '/api/super/admins',
+  canDelete: false,
+  fields: async () => [{ name: 'name', label: 'Full name', required: true }, { name: 'username', label: 'Username', required: true, createOnly: true }, { name: 'email', label: 'Email', type: 'email' }, { name: 'phone', label: 'Phone' }],
+  onCreated: (r, d) => showSecret('Admin account created', `Login for ${d.username}:`, r.temp_password),
+  rowActions: userActions,
+  cols: [{ label: 'Name', key: 'name' }, { label: 'Username', key: 'username' }, { label: 'Email', key: 'email' }, { label: 'Status', render: activeBadge }],
 });
 
 async function settings(main) {
-  const s = await api('/api/admin/settings');
+  const s = await api('/api/super/settings');
   main.append(h('div', { class: 'card' }, buildForm([
-    { name: 'college_name', label: 'College name', required: true },
-    { name: 'college_short', label: 'Logo letters (max 4)', required: true },
-    { name: 'academic_session', label: 'Academic session', required: true, placeholder: '2026-27' },
-    { name: 'library_issue_days', label: 'Library: issue period (days)', type: 'number', min: 1, max: 180, required: true },
-    { name: 'library_fine_per_day', label: 'Library: late fine per day (Rs)', type: 'number', min: 0, step: '0.5', required: true },
-    { name: 'feedback_open', label: 'Faculty feedback form', type: 'select', required: true, options: [{ value: '1', label: 'Open for students' }, { value: '0', label: 'Closed' }] },
-    { name: 'feedback_cycle', label: 'Feedback cycle name', required: true, placeholder: '2026-27 Odd Sem' },
-    { name: 'match_threshold', label: 'Face match strictness (0.30 - 0.70)', type: 'number', step: '0.01', min: 0.3, max: 0.7, required: true, hint: 'Lower = stricter (fewer wrong matches, more students missed). 0.50 is a good start; try 0.45 if look-alikes get mixed up.' },
-    { name: 'min_face_confidence', label: 'Face detection confidence (0.20 - 0.95)', type: 'number', step: '0.05', min: 0.2, max: 0.95, required: true, hint: 'Lower finds more small or back-row faces but may count non-faces.' },
-  ], { values: s, submitLabel: 'Save settings', onSubmit: async (d) => { await api('/api/admin/settings', { method: 'PUT', body: d }); toast('Settings saved'); } })));
+    { name: 'university_name', label: 'University name', required: true, full: true },
+    { name: 'scan_minutes', label: 'Camera scan duration (minutes)', type: 'number', min: 1, max: 15, required: true, hint: 'How long the camera looks for students after the teacher presses Start' },
+    { name: 'frame_interval_seconds', label: 'Seconds between camera captures', type: 'number', min: 1, max: 30, required: true },
+    { name: 'match_threshold', label: 'Face match strictness (0.30 - 0.70)', type: 'number', step: '0.01', min: 0.3, max: 0.7, required: true, hint: 'Lower = stricter. 0.50 is a good start; 0.45 if look-alikes get mixed up' },
+    { name: 'min_face_confidence', label: 'Face detection confidence (0.20 - 0.95)', type: 'number', step: '0.05', min: 0.2, max: 0.95, required: true, hint: 'Lower finds more back-row faces' },
+    { name: 'queue_threshold', label: 'Queue above this many submissions per minute', type: 'number', min: 1, required: true },
+    { name: 'queue_deadline_minutes', label: 'Queue deadline (minutes)', type: 'number', min: 1, max: 55, required: true, hint: 'Queued attendance older than this is saved even during peak' },
+  ], { values: s, submitLabel: 'Save settings', onSubmit: async (d) => { await api('/api/super/settings', { method: 'PUT', body: d }); toast('Settings saved', 'ok'); } })));
 }
 
 async function auditLog(main) {
   main.append(h('div', { class: 'card' }, table([
-    { label: 'When', render: (a) => fmtDateTime(a.at) }, { label: 'Who', key: 'user_name' }, { label: 'Action', key: 'action' },
-    { label: 'Detail', render: (a) => h('span', { class: 'small muted', text: a.detail || '' }) },
-  ], await api('/api/admin/audit'))));
+    { label: 'When', render: (a) => fmtDateTime(a.at) }, { label: 'Who', render: (a) => (a.user_name ? `${a.user_name} (${a.role})` : '-') }, { label: 'Action', key: 'action' },
+    { label: 'Detail', render: (a) => h('span', { class: 'small muted', text: a.detail ? JSON.stringify(a.detail).slice(0, 140) : '' }) },
+  ], await api('/api/super/audit'))));
 }
 
-const subjectPairs = async () => {
-  const list = await api('/api/admin/assignments');
-  return list.map((a) => ({ value: `${a.class_id}:${a.subject_id}`, label: `${a.class_name} - ${a.subject_code} ${a.subject_name} (${a.teacher_name})` }));
-};
-
-startApp('admin', [
+const views = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', group: 'Overview', render: dashboard },
-  { id: 'students', label: 'Students', icon: 'students', group: 'Academics', render: students },
-  { id: 'teachers', label: 'Faculty', icon: 'teacher', group: 'Academics', render: teachers },
-  { id: 'classes', label: 'Classes', icon: 'building', group: 'Academics', render: classes },
+  { id: 'students', label: 'Students', icon: 'students', group: 'People', render: students },
+  { id: 'faculty', label: 'Faculty', icon: 'teacher', group: 'People', render: faculty },
+  { id: 'faces', label: 'Face enrolment', icon: 'scan', group: 'People', render: faces },
+  { id: 'timetable', label: 'Lecture allotment', icon: 'calendar', group: 'Academics', render: timetable },
+  { id: 'classes', label: 'Classes', icon: 'layers', group: 'Academics', render: classes },
   { id: 'subjects', label: 'Subjects', icon: 'book', group: 'Academics', render: subjects },
-  { id: 'departments', label: 'Departments', icon: 'layers', group: 'Academics', render: departments },
-  { id: 'assignments', label: 'Subject allotment', icon: 'link', group: 'Academics', render: assignments },
-  { id: 'timetable', label: 'Timetable', icon: 'clock', group: 'Academics', render: timetable },
-  { id: 'attendance', label: 'Attendance', icon: 'check', group: 'Attendance', render: attendance },
-  { id: 'faces', label: 'Face enrolment', icon: 'scan', group: 'Attendance', render: enrollView('/api/admin/classes') },
-  { id: 'leave', label: 'Leave requests', icon: 'calendar', group: 'Attendance', render: leaveReview },
-  { id: 'results', label: 'Results', icon: 'award', group: 'Examination', render: resultsAdmin },
-  { id: 'marks-entry', label: 'Marks entry', icon: 'clipboard', group: 'Examination', render: async (main) => resultsSheet(main, await subjectPairs()) },
-  { id: 'fees', label: 'Fee collection', icon: 'wallet', group: 'Finance', render: feeCollection },
-  { id: 'fee-heads', label: 'Fee heads', icon: 'receipt', group: 'Finance', render: feeHeads },
-  { id: 'library', label: 'Library', icon: 'library', group: 'Campus', render: library },
-  { id: 'hostel', label: 'Hostel', icon: 'home', group: 'Campus', render: hostel },
-  { id: 'transport', label: 'Transport', icon: 'bus', group: 'Campus', render: transport },
-  { id: 'id-cards', label: 'ID cards', icon: 'id', group: 'Campus', render: idCards },
-  { id: 'notices', label: 'Notices', icon: 'bell', group: 'Communication', render: notices },
-  { id: 'grievances', label: 'Grievances', icon: 'alert', group: 'Communication', render: grievances },
-  { id: 'feedback', label: 'Faculty feedback', icon: 'star', group: 'Communication', render: feedbackSummary },
-  { id: 'settings', label: 'Settings', icon: 'settings', group: 'System', render: settings },
-  { id: 'audit', label: 'Audit log', icon: 'log', group: 'System', render: auditLog },
-]).then((ctx) => {
-  // Menu counters for things waiting on the admin.
-  api('/api/admin/stats').then((s) => { ctx.setBadge('leave', s.pending_leaves); ctx.setBadge('grievances', s.open_grievances); }).catch(() => {});
-});
+  { id: 'rooms', label: 'Rooms and cameras', icon: 'door', group: 'Academics', render: rooms },
+  { id: 'departments', label: 'Departments', icon: 'building', group: 'Academics', render: departments },
+  { id: 'records', label: 'Attendance records', icon: 'checkbox', group: 'Attendance', render: records },
+  { id: 'reports', label: 'Reports', icon: 'chart', group: 'Attendance', render: reports },
+];
+const superViews = [
+  { id: 'monitor', label: 'Live monitor', icon: 'activity', group: 'Super admin', render: monitor },
+  { id: 'admins', label: 'Admins', icon: 'shield', group: 'Super admin', render: admins },
+  { id: 'settings', label: 'Settings', icon: 'settings', group: 'Super admin', render: settings },
+  { id: 'audit', label: 'Audit log', icon: 'log', group: 'Super admin', render: auditLog },
+];
+
+const me = await api('/api/me').catch(() => null);
+startApp(['admin', 'super_admin'], me?.role === 'super_admin' ? [...views, ...superViews] : views);
