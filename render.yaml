@@ -1,6 +1,13 @@
-# One-click demo on Render (free plan). The free disk is wiped on every restart/deploy, so the
-# server re-creates the super admin and demo data on start. Passwords: Render dashboard ->
-# the service -> Environment. For real use, add a PostgreSQL database and set DATABASE_URL.
+# Render blueprint: the web app + a PostgreSQL database.
+# Free plan notes: the free database expires 30 days after it is created (upgrade it to a paid
+# plan in the Render dashboard to keep the data), and the free web service sleeps after 15
+# minutes without visits. Passwords: Render dashboard -> uu-college-erp -> Environment.
+databases:
+  - name: uu-erp-db
+    plan: free
+    databaseName: uu_erp
+    user: uu_erp
+
 services:
   - type: web
     name: uu-college-erp
@@ -17,6 +24,12 @@ services:
         value: Asia/Kolkata
       - key: TRUST_PROXY
         value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: uu-erp-db
+          property: connectionString
+      - key: DB_POOL_SIZE
+        value: "5"
       - key: SEED_DEMO
         value: "1"
       - key: SESSION_SECRET

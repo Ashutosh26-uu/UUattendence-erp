@@ -58,6 +58,10 @@ npm run seed:demo
 
 Logins are in `data/demo-logins.txt`.
 
+### Render (demo hosting)
+
+`render.yaml` creates the web service and a free PostgreSQL database (`uu-erp-db`) and connects them. Passwords are in the Render dashboard under uu-college-erp → Environment (`SUPER_ADMIN_PASSWORD`, `DEMO_PASSWORD`). Render deletes a **free database 30 days after it is created**; upgrade it in the dashboard to keep the data. The embedded database is not used on Render, because its first start needs more memory than the free plan's 512 MB.
+
 ### Production (university server)
 
 | Variable | Meaning |

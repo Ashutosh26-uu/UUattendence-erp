@@ -13,11 +13,21 @@ async function connect() {
   if (impl) return impl;
   if (process.env.DATABASE_URL) {
     const { Pool } = require('pg');
-    const pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      max: Number(process.env.DB_POOL_SIZE) || 20,
-      ssl: process.env.DATABASE_SSL === '0' ? false : (/localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false }),
-    });
+    // SSL: off for local and private-network hosts (e.g. Render's internal "dpg-xxxx-a"),
+    // on for public hosts. DATABASE_SSL=0/1 overrides.
+    const host = new URL(process.env.DATABASE_URL).hostname;
+    const privateHost = host === 'localhost' || /^127\.|^10\.|^192\.168\./.test(host) || !host.includes('.');
+    let ssl = process.env.DATABASE_SSL === '0' ? false : process.env.DATABASE_SSL === '1' || !privateHost ? { rejectUnauthorized: false } : false;
+    const makePool = () => new Pool({ connectionString: process.env.DATABASE_URL, max: Number(process.env.DB_POOL_SIZE) || 20, ssl });
+    let pool = makePool();
+    try {
+      await pool.query('SELECT 1');
+    } catch (err) {
+      if (!ssl || !/does not support SSL/i.test(err.message)) throw err;
+      await pool.end().catch(() => {});
+      ssl = false;
+      pool = makePool();
+    }
     impl = {
       mode: 'postgresql',
       query: (text, params) => pool.query(text, params),
