@@ -39,7 +39,12 @@ async function connect() {
     };
   } else {
     const { PGlite } = await import('@electric-sql/pglite');
-    const pg = new PGlite(path.join(DATA_DIR, 'pgdata'));
+    const dir = path.join(DATA_DIR, 'pgdata');
+    // A brand-new database starts from a pre-initialised copy (assets/empty-pgdata.tar.gz)
+    // instead of running initdb, which needs ~550 MB of memory; this needs ~150 MB.
+    const bundle = path.join(__dirname, '..', 'assets', 'empty-pgdata.tar.gz');
+    const opts = !fs.existsSync(dir) && fs.existsSync(bundle) ? { loadDataDir: new Blob([fs.readFileSync(bundle)]) } : {};
+    const pg = new PGlite(dir, opts);
     await pg.waitReady;
     impl = {
       mode: 'embedded (PGlite)',
