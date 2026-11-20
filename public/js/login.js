@@ -29,9 +29,22 @@ function selectRole(r) {
   error.classList.add('hidden');
 }
 
+const showBtn = h('button', { type: 'button', class: 'sm pw-toggle', text: 'Show', 'aria-label': 'Show password', 'aria-pressed': 'false' });
+showBtn.addEventListener('click', () => {
+  const show = passInput.type === 'password';
+  passInput.type = show ? 'text' : 'password';
+  showBtn.textContent = show ? 'Hide' : 'Show';
+  showBtn.setAttribute('aria-pressed', String(show));
+  passInput.focus();
+});
+const capsWarn = h('span', { class: 'small caps-warn hidden', text: 'Caps Lock is on' });
+const checkCaps = (e) => capsWarn.classList.toggle('hidden', !e.getModifierState?.('CapsLock'));
+passInput.addEventListener('keydown', checkCaps);
+passInput.addEventListener('keyup', checkCaps);
+
 const form = h('form', null,
   h('div', { class: 'field' }, userLabel, userInput),
-  h('div', { class: 'field' }, h('label', { for: 'p', text: 'Password' }), passInput),
+  h('div', { class: 'field' }, h('label', { for: 'p', text: 'Password' }), h('div', { class: 'pw-wrap' }, passInput, showBtn), capsWarn),
   error, submit);
 form.addEventListener('submit', async (e) => {
   e.preventDefault();

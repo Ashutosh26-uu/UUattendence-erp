@@ -121,16 +121,31 @@ function requireRole(...roles) {
   };
 }
 
-// Brute-force guard: 5 wrong passwords per username+IP lock it for 10 minutes.
+// The visitor's own address. Behind hosting proxies (Render, Cloudflare) req.ip can be the
+// proxy's address, which every user shares, so one person's wrong passwords would lock the
+// account for everyone. The proxies pass the real address in these headers.
+function clientIp(req) {
+  if (process.env.TRUST_PROXY === '1') {
+    const h = req.headers;
+    const ip = h['cf-connecting-ip'] || h['true-client-ip'] || String(h['x-forwarded-for'] || '').split(',')[0].trim();
+    if (ip) return ip;
+  }
+  return req.ip;
+}
+
+// Brute-force guard: 10 wrong passwords per username + visitor within 15 minutes lock that
+// pair for 15 minutes. Other visitors can still sign in to the same account.
+const MAX_FAILURES = 10;
+const LOCK_MS = 15 * 60e3;
 const failures = new Map();
-const loginKey = (req, u) => `${req.ip}|${String(u).toLowerCase()}`;
+const loginKey = (req, u) => `${clientIp(req)}|${String(u).toLowerCase()}`;
 function loginAllowed(key) {
   const f = failures.get(key);
-  return !f || f.count < 5 || f.until < Date.now();
+  return !f || f.count < MAX_FAILURES || f.until < Date.now();
 }
 function loginFailed(key) {
   const f = failures.get(key);
-  failures.set(key, { count: f && f.until > Date.now() ? f.count + 1 : 1, until: Date.now() + 10 * 60e3 });
+  failures.set(key, { count: f && f.until > Date.now() ? f.count + 1 : 1, until: Date.now() + LOCK_MS });
   if (failures.size > 50000) failures.clear();
 }
 const loginSucceeded = (key) => failures.delete(key);

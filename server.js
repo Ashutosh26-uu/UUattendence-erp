@@ -82,6 +82,22 @@ async function main() {
   }
   if (process.env.SEED_DEMO === '1') await require('./scripts/seed-demo').seedDemo();
 
+  // Keep env passwords and accounts in step: if SUPER_ADMIN_PASSWORD / DEMO_PASSWORD changed
+  // (or were added after the database was created), the matching accounts take the env value,
+  // unless that person already set their own password in the app.
+  const syncPassword = async (username, password) => {
+    const u = await db.one('SELECT id, password_hash FROM users WHERE lower(username) = lower($1)', [username]);
+    if (!u || !password || await auth.verifyPassword(password, u.password_hash)) return;
+    const changedByUser = await db.one("SELECT 1 FROM audit_log WHERE user_id = $1 AND action = 'password_changed' LIMIT 1", [u.id]);
+    if (changedByUser) return;
+    await db.query('UPDATE users SET password_hash = $2, must_change_pw = FALSE, active = TRUE WHERE id = $1', [u.id, await auth.hashPassword(password)]);
+    console.log(`Password of "${username}" set from the environment`);
+  };
+  await syncPassword('superadmin', process.env.SUPER_ADMIN_PASSWORD);
+  if (process.env.SEED_DEMO === '1') {
+    for (const u of ['admin1', 'teacher1', 'teacher2', 'teacher3']) await syncPassword(u, process.env.DEMO_PASSWORD);
+  }
+
   await queue.startWorker();
   const PORT = Number(process.env.PORT) || 3000;
   app.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`United University ERP on http://localhost:${PORT} (database: ${db.mode()})`));

@@ -15,11 +15,14 @@ router.post('/login', async (req, res) => {
   const username = str(req.body?.username, 'Username', { required: true, max: 100 });
   const role = req.body?.role ? String(req.body.role) : null;
   const key = auth.loginKey(req, username);
-  if (!auth.loginAllowed(key)) throw new HttpError(429, 'Too many wrong attempts. Try again after 10 minutes.');
+  if (!auth.loginAllowed(key)) throw new HttpError(429, 'Too many wrong attempts. Try again after 15 minutes.');
   const u = await one(`SELECT u.id, u.password_hash, u.role, u.name, u.active, u.must_change_pw, u.token_version FROM users u
     LEFT JOIN teachers t ON t.user_id = u.id WHERE lower(u.username) = lower($1) OR lower(t.employee_no) = lower($1)
     ORDER BY lower(u.username) = lower($1) DESC LIMIT 1`, [username]);
-  const ok = u && u.active && await auth.verifyPassword(req.body?.password ?? '', u.password_hash);
+  const password = String(req.body?.password ?? '');
+  // A password pasted with a stray space or line break at either end is still accepted.
+  const ok = u && u.active && (await auth.verifyPassword(password, u.password_hash)
+    || (password.trim() !== password && await auth.verifyPassword(password.trim(), u.password_hash)));
   // The chosen login tab must match the account, so a teacher cannot sign in on the admin tab.
   const roleOk = ok && (!role || role === u.role);
   if (!roleOk) {
